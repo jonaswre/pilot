@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/qf-studio/pilot/internal/adapters"
 	"github.com/qf-studio/pilot/internal/testutil"
 )
 
@@ -164,9 +165,9 @@ func TestGenerateProgressBar(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := generateProgressBar(tt.progress)
+			got := adapters.GenerateProgressBar(tt.progress, 10)
 			if got != tt.expected {
-				t.Errorf("generateProgressBar(%d) = %q, want %q", tt.progress, got, tt.expected)
+				t.Errorf("GenerateProgressBar(%d, 10) = %q, want %q", tt.progress, got, tt.expected)
 			}
 			// Verify length is always 10 characters (10 blocks)
 			if len([]rune(got)) != 10 {

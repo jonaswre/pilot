@@ -12,6 +12,11 @@ import (
 
 const (
 	telegramAPIURL = "https://api.telegram.org/bot"
+
+	// maxAPIResponseSize limits API JSON response reads to 1MB.
+	maxAPIResponseSize = 1 << 20
+	// maxFileDownloadSize limits file downloads to 50MB.
+	maxFileDownloadSize = 50 << 20
 )
 
 // Client is a Telegram Bot API client
@@ -178,7 +183,7 @@ func (c *Client) CheckSingleton(ctx context.Context) error {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxAPIResponseSize))
 	if err != nil {
 		return fmt.Errorf("failed to read response: %w", err)
 	}
@@ -222,7 +227,7 @@ func (c *Client) GetMe(ctx context.Context) (*User, error) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxAPIResponseSize))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
@@ -254,7 +259,7 @@ func (c *Client) GetUpdates(ctx context.Context, offset int64, timeout int) ([]*
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxAPIResponseSize))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
@@ -298,7 +303,7 @@ func (c *Client) SendMessage(ctx context.Context, chatID, text, parseMode string
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxAPIResponseSize))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
@@ -345,7 +350,7 @@ func (c *Client) SendMessageWithKeyboard(ctx context.Context, chatID, text, pars
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxAPIResponseSize))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
@@ -397,7 +402,7 @@ func (c *Client) EditMessage(ctx context.Context, chatID string, messageID int64
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxAPIResponseSize))
 	if err != nil {
 		return fmt.Errorf("failed to read response: %w", err)
 	}
@@ -463,7 +468,7 @@ func (c *Client) GetFile(ctx context.Context, fileID string) (*File, error) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxAPIResponseSize))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
@@ -499,7 +504,7 @@ func (c *Client) DownloadFile(ctx context.Context, filePath string) ([]byte, err
 		return nil, fmt.Errorf("download failed with status: %d", resp.StatusCode)
 	}
 
-	data, err := io.ReadAll(resp.Body)
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxFileDownloadSize))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read file data: %w", err)
 	}

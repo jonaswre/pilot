@@ -274,6 +274,7 @@ func TestEscapeMarkdown(t *testing.T) {
 	}{
 		{"hello_world", "\\_"},
 		{"*bold*", "\\*"},
+		{"`code`", "\\`"},
 		{"[link]", "\\["},
 		{"plain text", "plain text"},
 	}
@@ -793,37 +794,37 @@ Created g.go`
 	}
 }
 
-// TestEscapeMarkdownAllChars tests all markdown special characters
-func TestEscapeMarkdownAllChars(t *testing.T) {
-	specialChars := []struct {
+// TestEscapeMarkdownLegacyChars tests legacy Markdown special characters
+func TestEscapeMarkdownLegacyChars(t *testing.T) {
+	// Only these 4 chars are special in Telegram legacy Markdown
+	escaped := []struct {
 		char    string
 		escaped string
 	}{
 		{"_", "\\_"},
 		{"*", "\\*"},
+		{"`", "\\`"},
 		{"[", "\\["},
-		{"]", "\\]"},
-		{"(", "\\("},
-		{")", "\\)"},
-		{"~", "\\~"},
-		{">", "\\>"},
-		{"#", "\\#"},
-		{"+", "\\+"},
-		{"-", "\\-"},
-		{"=", "\\="},
-		{"|", "\\|"},
-		{"{", "\\{"},
-		{"}", "\\}"},
-		{".", "\\."},
-		{"!", "\\!"},
 	}
 
-	for _, tc := range specialChars {
-		t.Run("char_"+tc.char, func(t *testing.T) {
+	for _, tc := range escaped {
+		t.Run("escaped_"+tc.char, func(t *testing.T) {
 			input := "text" + tc.char + "more"
 			got := escapeMarkdown(input)
 			if !strings.Contains(got, tc.escaped) {
 				t.Errorf("escapeMarkdown(%q) = %q, want to contain %q", input, got, tc.escaped)
+			}
+		})
+	}
+
+	// These should NOT be escaped in legacy mode
+	passthrough := []string{".", "!", "(", ")", "~", ">", "#", "+", "-", "=", "|", "{", "}", "]"}
+	for _, ch := range passthrough {
+		t.Run("passthrough_"+ch, func(t *testing.T) {
+			input := "text" + ch + "more"
+			got := escapeMarkdown(input)
+			if strings.Contains(got, "\\"+ch) {
+				t.Errorf("escapeMarkdown(%q) = %q, should NOT escape %q in legacy mode", input, got, ch)
 			}
 		})
 	}

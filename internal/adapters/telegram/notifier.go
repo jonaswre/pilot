@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/qf-studio/pilot/internal/adapters"
 	"github.com/qf-studio/pilot/internal/comms"
 	"github.com/qf-studio/pilot/internal/transcription"
 )
@@ -39,6 +40,17 @@ func DefaultConfig() *Config {
 	}
 }
 
+// Validate checks that required fields are set.
+func (c *Config) Validate() error {
+	if c.BotToken == "" {
+		return fmt.Errorf("telegram: bot_token is required")
+	}
+	if c.ChatID == "" {
+		return fmt.Errorf("telegram: chat_id is required")
+	}
+	return nil
+}
+
 // Notifier sends notifications to Telegram
 type Notifier struct {
 	client        *Client
@@ -70,8 +82,8 @@ func (n *Notifier) SendMessage(ctx context.Context, text string) error {
 	return err
 }
 
-// SendTaskStarted notifies that a task has started
-func (n *Notifier) SendTaskStarted(ctx context.Context, taskID, title string) error {
+// TaskStarted notifies that a task has started
+func (n *Notifier) TaskStarted(ctx context.Context, taskID, title string) error {
 	var text string
 	if n.plainTextMode {
 		text = fmt.Sprintf("🚀 Pilot started task\n%s %s", taskID, title)
@@ -82,8 +94,8 @@ func (n *Notifier) SendTaskStarted(ctx context.Context, taskID, title string) er
 	return err
 }
 
-// SendTaskCompleted notifies that a task has completed
-func (n *Notifier) SendTaskCompleted(ctx context.Context, taskID, title, prURL string) error {
+// TaskCompleted notifies that a task has completed
+func (n *Notifier) TaskCompleted(ctx context.Context, taskID, title, prURL string) error {
 	var text string
 	if n.plainTextMode {
 		text = fmt.Sprintf("✅ Pilot completed task\n%s %s", taskID, title)
@@ -100,8 +112,8 @@ func (n *Notifier) SendTaskCompleted(ctx context.Context, taskID, title, prURL s
 	return err
 }
 
-// SendTaskFailed notifies that a task has failed
-func (n *Notifier) SendTaskFailed(ctx context.Context, taskID, title, errorMsg string) error {
+// TaskFailed notifies that a task has failed
+func (n *Notifier) TaskFailed(ctx context.Context, taskID, title, errorMsg string) error {
 	var text string
 	if n.plainTextMode {
 		text = fmt.Sprintf("❌ Pilot task failed\n%s %s\n\n%s", taskID, title, errorMsg)
@@ -114,7 +126,7 @@ func (n *Notifier) SendTaskFailed(ctx context.Context, taskID, title, errorMsg s
 
 // TaskProgress notifies about task progress
 func (n *Notifier) TaskProgress(ctx context.Context, taskID, status string, progress int) error {
-	progressBar := generateProgressBar(progress)
+	progressBar := adapters.GenerateProgressBar(progress, 10)
 	var text string
 	if n.plainTextMode {
 		text = fmt.Sprintf("⏳ Task Progress\n%s %s\n%s %d%%", taskID, status, progressBar, progress)
@@ -135,20 +147,6 @@ func (n *Notifier) PRReady(ctx context.Context, taskID, title, prURL string, fil
 	}
 	_, err := n.client.SendMessage(ctx, n.chatID, text, n.getParseMode())
 	return err
-}
-
-// generateProgressBar generates a text-based progress bar
-func generateProgressBar(progress int) string {
-	filled := progress / 10
-	empty := 10 - filled
-	bar := ""
-	for i := 0; i < filled; i++ {
-		bar += "█"
-	}
-	for i := 0; i < empty; i++ {
-		bar += "░"
-	}
-	return bar
 }
 
 // SendBudgetWarning notifies about approaching budget limits

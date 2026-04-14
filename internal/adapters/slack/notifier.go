@@ -3,6 +3,8 @@ package slack
 import (
 	"context"
 	"fmt"
+
+	"github.com/qf-studio/pilot/internal/adapters"
 )
 
 // Config holds Slack adapter configuration
@@ -65,7 +67,7 @@ func (n *Notifier) TaskStarted(ctx context.Context, taskID, title string) error 
 
 // TaskProgress notifies about task progress
 func (n *Notifier) TaskProgress(ctx context.Context, taskID, status string, progress int) error {
-	progressBar := generateProgressBar(progress)
+	progressBar := adapters.GenerateProgressBar(progress, 10)
 
 	msg := &Message{
 		Channel: n.channel,
@@ -161,16 +163,3 @@ func (n *Notifier) PRReady(ctx context.Context, taskID, title, prURL string, fil
 	return err
 }
 
-// generateProgressBar generates a text-based progress bar
-func generateProgressBar(progress int) string {
-	filled := progress / 10
-	empty := 10 - filled
-	bar := ""
-	for i := 0; i < filled; i++ {
-		bar += "█"
-	}
-	for i := 0; i < empty; i++ {
-		bar += "░"
-	}
-	return bar
-}

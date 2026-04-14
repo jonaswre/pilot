@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/qf-studio/pilot/internal/adapters"
 	"github.com/qf-studio/pilot/internal/executor"
 )
 
@@ -51,16 +52,7 @@ func FormatTaskStarted(taskID, description string) string {
 
 // FormatProgressUpdate formats a progress update message
 func FormatProgressUpdate(taskID, phase string, progress int, message string) string {
-	// Build progress bar (20 chars)
-	filled := progress / 5 // 0-20 filled chars
-	if filled > 20 {
-		filled = 20
-	}
-	if filled < 0 {
-		filled = 0
-	}
-
-	bar := strings.Repeat("█", filled) + strings.Repeat("░", 20-filled)
+	bar := adapters.GenerateProgressBar(progress, 20)
 
 	// Phase emoji
 	phaseEmoji := "⏳"
@@ -422,27 +414,14 @@ func extractSummary(output string) string {
 	return strings.Join(summaryItems, "\n")
 }
 
-// escapeMarkdown escapes Telegram Markdown special characters
+// escapeMarkdown escapes special characters for Telegram legacy Markdown mode.
+// Only the four formatting characters need escaping: _ * ` [
 func escapeMarkdown(text string) string {
-	// Characters that need escaping in Telegram Markdown
 	replacer := strings.NewReplacer(
 		"_", "\\_",
 		"*", "\\*",
+		"`", "\\`",
 		"[", "\\[",
-		"]", "\\]",
-		"(", "\\(",
-		")", "\\)",
-		"~", "\\~",
-		">", "\\>",
-		"#", "\\#",
-		"+", "\\+",
-		"-", "\\-",
-		"=", "\\=",
-		"|", "\\|",
-		"{", "\\{",
-		"}", "\\}",
-		".", "\\.",
-		"!", "\\!",
 	)
 	return replacer.Replace(text)
 }

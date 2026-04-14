@@ -475,6 +475,11 @@ func (m *WorktreeManager) Close() {
 	slog.Info("Worktree pool drained")
 }
 
+// RepoPath returns the repository path for this manager.
+func (m *WorktreeManager) RepoPath() string {
+	return m.repoPath
+}
+
 // PoolSize returns the configured pool size.
 func (m *WorktreeManager) PoolSize() int {
 	return m.poolSize

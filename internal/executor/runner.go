@@ -528,6 +528,13 @@ func (r *Runner) backendType() string {
 	return "claude-code"
 }
 
+// resolveIsolationProvider returns the IsolationProvider for the current configuration.
+// It creates the provider from the BackendConfig.Isolation field if set, falling back
+// to the legacy UseWorktree/WorktreePoolSize fields for backward compatibility.
+func (r *Runner) resolveIsolationProvider() IsolationProvider {
+	return NewIsolationProvider(r.config, r.worktreeManager)
+}
+
 // SetBackend changes the execution backend.
 func (r *Runner) SetBackend(backend Backend) {
 	r.backend = backend
@@ -950,85 +957,70 @@ func (r *Runner) executeWithOptions(ctx context.Context, task *Task, allowWorktr
 		}
 	}
 
-	// GH-936: Create isolated worktree if configured
-	// This allows execution even when user has uncommitted changes in their working directory
+	// GH-936: Create isolated environment if configured.
+	// This allows execution even when user has uncommitted changes in their working directory.
 	executionPath := task.ProjectPath
-	var cleanupWorktree func()
+	var isolationCommandRunner CommandRunner
 
-	// Debug: log worktree condition state
-	r.log.Info("Worktree condition check",
+	provider := r.resolveIsolationProvider()
+
+	// Debug: log isolation condition state
+	r.log.Info("Isolation condition check",
 		slog.Bool("allowWorktree", allowWorktree),
-		slog.Bool("configNotNil", r.config != nil),
-		slog.Bool("useWorktree", r.config != nil && r.config.UseWorktree),
+		slog.String("provider", provider.Name()),
 		slog.String("branch", task.Branch),
 		slog.Bool("directCommit", task.DirectCommit),
 	)
 
-	if allowWorktree && r.config != nil && r.config.UseWorktree && task.Branch != "" && !task.DirectCommit {
-		r.log.Info("Creating isolated worktree for execution",
+	if allowWorktree && provider.Name() != IsolationTypeNone && task.Branch != "" && !task.DirectCommit {
+		r.log.Info("Creating isolated environment for execution",
 			slog.String("task_id", task.ID),
 			slog.String("branch", task.Branch),
+			slog.String("provider", provider.Name()),
 		)
-		r.reportProgress(task.ID, "Worktree", 1, "Creating isolated worktree...")
+		r.reportProgress(task.ID, "Worktree", 1, "Creating isolated environment...")
 
-		var worktreePath string
-		var cleanup func()
-		var err error
-
-		// GH-1078: Use pool if available, otherwise fall back to direct creation
-		if r.worktreeManager != nil && r.worktreeManager.PoolSize() > 0 {
-			r.log.Debug("Using worktree pool",
-				slog.Int("pool_available", r.worktreeManager.PoolAvailable()),
-			)
-			var result *WorktreeResult
-			result, err = r.worktreeManager.Acquire(ctx, task.ID, task.Branch, "")
-			if err == nil {
-				worktreePath = result.Path
-				cleanup = result.Cleanup
-			}
-		} else {
-			worktreePath, cleanup, err = CreateWorktreeWithBranch(
-				ctx, task.ProjectPath, task.ID, task.Branch, "")
-		}
-
+		env, err := provider.Prepare(ctx, IsolationOpts{
+			TaskID:      task.ID,
+			ProjectPath: task.ProjectPath,
+			Branch:      task.Branch,
+			BaseBranch:  "",
+		})
 		if err != nil {
-			r.log.Error("Failed to create worktree",
+			r.log.Error("Failed to create isolated environment",
 				slog.String("task_id", task.ID),
 				slog.Any("error", err),
 			)
 			return &ExecutionResult{
 				TaskID:  task.ID,
 				Success: false,
-				Error:   fmt.Sprintf("failed to create worktree: %v", err),
-			}, fmt.Errorf("worktree creation failed: %w", err)
+				Error:   fmt.Sprintf("failed to create isolated environment: %v", err),
+			}, fmt.Errorf("isolation preparation failed: %w", err)
 		}
-		cleanupWorktree = cleanup
-		executionPath = worktreePath
+		defer env.Cleanup()
+
+		executionPath = env.WorkDir
+		isolationCommandRunner = env.CommandRunner
 
 		// Copy Navigator config to worktree (handles untracked .agent/ content)
-		if err := EnsureNavigatorInWorktree(task.ProjectPath, worktreePath); err != nil {
-			cleanup()
-			r.log.Error("Failed to copy Navigator to worktree",
+		if err := EnsureNavigatorInWorktree(task.ProjectPath, executionPath); err != nil {
+			r.log.Error("Failed to copy Navigator to isolated environment",
 				slog.String("task_id", task.ID),
 				slog.Any("error", err),
 			)
 			return &ExecutionResult{
 				TaskID:  task.ID,
 				Success: false,
-				Error:   fmt.Sprintf("failed to setup navigator in worktree: %v", err),
-			}, fmt.Errorf("navigator worktree setup failed: %w", err)
+				Error:   fmt.Sprintf("failed to setup navigator in isolated environment: %v", err),
+			}, fmt.Errorf("navigator isolation setup failed: %w", err)
 		}
 
-		r.log.Info("Using isolated worktree",
+		r.log.Info("Using isolated environment",
 			slog.String("task_id", task.ID),
-			slog.String("worktree", worktreePath),
+			slog.String("work_dir", executionPath),
+			slog.String("provider", provider.Name()),
 		)
-		r.reportProgress(task.ID, "Worktree", 2, "Worktree ready")
-	}
-
-	// Ensure worktree cleanup on exit (handles panic, early return, success)
-	if cleanupWorktree != nil {
-		defer cleanupWorktree()
+		r.reportProgress(task.ID, "Worktree", 2, "Isolated environment ready")
 	}
 
 	// GH-915: Run pre-flight checks to catch environmental issues early
@@ -1038,7 +1030,7 @@ func (r *Runner) executeWithOptions(ctx context.Context, task *Task, allowWorktr
 	// create dirty git state after our install script commits.
 	if !r.skipPreflightChecks {
 		preflightOpts := PreflightOptions{
-			SkipGitClean: task.LocalMode || (r.config != nil && r.config.UseWorktree),
+			SkipGitClean: task.LocalMode || provider.Name() != IsolationTypeNone,
 			BackendType:  r.backendType(),
 		}
 		if err := RunPreflightChecksWithOptions(ctx, executionPath, preflightOpts); err != nil {
@@ -1303,10 +1295,10 @@ func (r *Runner) executeWithOptions(ctx context.Context, task *Task, allowWorktr
 	// Initialize git operations in execution path (worktree or original)
 	git := NewGitOperations(executionPath)
 
-	// Create branch if specified (skip for direct commit mode and worktree mode)
-	// When using worktree, CreateWorktreeWithBranch already created the branch
-	useWorktree := r.config != nil && r.config.UseWorktree && task.Branch != "" && !task.DirectCommit
-	if task.Branch != "" && !task.DirectCommit && !useWorktree {
+	// Create branch if specified (skip for direct commit mode and isolation mode)
+	// When using isolation (worktree/sandbox), the provider already created the branch
+	useIsolation := provider.Name() != IsolationTypeNone && task.Branch != "" && !task.DirectCommit
+	if task.Branch != "" && !task.DirectCommit && !useIsolation {
 		r.reportProgress(task.ID, "Branching", 3, "Switching to default branch...")
 
 		// GH-279: Always switch to default branch and pull latest before creating new branch.
@@ -1495,12 +1487,13 @@ func (r *Runner) executeWithOptions(ctx context.Context, task *Task, allowWorktr
 	watchdogTimeout := 2 * timeout
 	backendResult, err := r.backend.Execute(ctx, ExecuteOptions{
 		Prompt:          prompt,
-		ProjectPath:     executionPath, // Use worktree path if active
+		ProjectPath:     executionPath, // Use isolated environment path if active
 		Verbose:         task.Verbose,
 		Model:           selectedModel,
 		Effort:          selectedEffort,
 		FromPR:          task.FromPR, // GH-1267: session resumption from PR context
 		WatchdogTimeout: watchdogTimeout,
+		CommandRunner:   isolationCommandRunner,
 		WatchdogCallback: func(pid int, watchdogDuration time.Duration) {
 			log.Warn("Watchdog killed subprocess",
 				slog.Int("pid", pid),

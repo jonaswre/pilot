@@ -153,6 +153,17 @@ executor:
                                # Allows execution even with uncommitted changes in working directory
                                # Useful when Pilot runs in same repo as your development work
 
+  # Isolation config (preferred, overrides use_worktree)
+  # isolation:
+  #   type: "worktree"         # "none" (default), "worktree", or "opensandbox"
+  #   worktree:
+  #     pool_size: 2           # Pre-created worktrees for faster task startup
+  #   opensandbox:
+  #     server_url: "http://localhost:8080"
+  #     api_key: "${OPENSANDBOX_API_KEY}"
+  #     image: "pilot/executor:latest"
+  #     timeout: 30m
+
   # Effort routing (Opus 4.6) - controls how thoroughly Claude reasons per complexity
   # effort_routing:
   #   enabled: true

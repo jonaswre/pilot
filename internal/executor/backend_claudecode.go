@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -308,19 +307,19 @@ func (b *ClaudeCodeBackend) executeWithFromPR(ctx context.Context, opts ExecuteO
 
 	args = append(args, b.config.ExtraArgs...)
 
-	cmd := exec.CommandContext(ctx, b.config.Command, args...)
-	cmd.Dir = opts.ProjectPath
+	// Build environment overrides
+	envOverrides := make(map[string]string)
+	if b.config.Disable1MContext {
+		envOverrides["CLAUDE_CODE_DISABLE_1M_CONTEXT"] = "1"
+	}
+	if b.config.MaxOutputTokens > 0 {
+		envOverrides["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = fmt.Sprintf("%d", b.config.MaxOutputTokens)
+	}
 
-	// Pass context window and output token env vars if configured (GH-2163).
-	if b.config.Disable1MContext || b.config.MaxOutputTokens > 0 {
-		env := os.Environ()
-		if b.config.Disable1MContext {
-			env = append(env, "CLAUDE_CODE_DISABLE_1M_CONTEXT=1")
-		}
-		if b.config.MaxOutputTokens > 0 {
-			env = append(env, fmt.Sprintf("CLAUDE_CODE_MAX_OUTPUT_TOKENS=%d", b.config.MaxOutputTokens))
-		}
-		cmd.Env = env
+	// Use CommandRunner from opts, or fall back to local execution
+	cmdRunner := opts.CommandRunner
+	if cmdRunner == nil {
+		cmdRunner = &LocalCommandRunner{}
 	}
 
 	b.log.Debug("Starting Claude Code",
@@ -328,22 +327,17 @@ func (b *ClaudeCodeBackend) executeWithFromPR(ctx context.Context, opts ExecuteO
 		slog.String("project", opts.ProjectPath),
 	)
 
-	// Create pipes for output
-	stdout, err := cmd.StdoutPipe()
+	// Start the command via CommandRunner
+	running, err := cmdRunner.Run(ctx, CommandRunOpts{
+		Command: b.config.Command,
+		Args:    args,
+		Dir:     opts.ProjectPath,
+		Env:     envOverrides,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to create stdout pipe: %w", err)
-	}
-
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return nil, fmt.Errorf("failed to create stderr pipe: %w", err)
-	}
-
-	// Start the command
-	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("failed to start Claude Code: %w", err)
 	}
-	b.log.Debug("Claude Code started", slog.Int("pid", cmd.Process.Pid))
+	b.log.Debug("Claude Code started", slog.Int("pid", running.PID))
 
 	// Track results
 	result := &BackendResult{}
@@ -375,28 +369,26 @@ func (b *ClaudeCodeBackend) executeWithFromPR(ctx context.Context, opts ExecuteO
 				age := time.Since(lastTime)
 				if age > b.heartbeatTimeout {
 					b.log.Warn("Heartbeat timeout detected, killing hung process",
-						slog.Int("pid", cmd.Process.Pid),
+						slog.Int("pid", running.PID),
 						slog.Duration("last_event_age", age),
 						slog.Duration("timeout", b.heartbeatTimeout),
 					)
 
 					// Invoke callback if provided
 					if opts.HeartbeatCallback != nil {
-						opts.HeartbeatCallback(cmd.Process.Pid, age)
+						opts.HeartbeatCallback(running.PID, age)
 					}
 
 					// Kill the hung process
-					if cmd.Process != nil {
-						if err := cmd.Process.Kill(); err != nil {
-							b.log.Error("Failed to kill hung process",
-								slog.Int("pid", cmd.Process.Pid),
-								slog.Any("error", err),
-							)
-						} else {
-							b.log.Info("Hung process killed successfully",
-								slog.Int("pid", cmd.Process.Pid),
-							)
-						}
+					if err := running.Kill(); err != nil {
+						b.log.Error("Failed to kill hung process",
+							slog.Int("pid", running.PID),
+							slog.Any("error", err),
+						)
+					} else {
+						b.log.Info("Hung process killed successfully",
+							slog.Int("pid", running.PID),
+						)
 					}
 					return
 				}
@@ -414,29 +406,25 @@ func (b *ClaudeCodeBackend) executeWithFromPR(ctx context.Context, opts ExecuteO
 				return
 			case <-time.After(opts.WatchdogTimeout):
 				// Watchdog timeout expired, forcibly kill the process
-				if cmd.Process == nil {
-					return
-				}
-
 				b.log.Warn("Watchdog timeout expired, forcibly killing subprocess",
-					slog.Int("pid", cmd.Process.Pid),
+					slog.Int("pid", running.PID),
 					slog.Duration("watchdog_timeout", opts.WatchdogTimeout),
 				)
 
 				// Invoke callback before killing (allows alert emission)
 				if opts.WatchdogCallback != nil {
-					opts.WatchdogCallback(cmd.Process.Pid, opts.WatchdogTimeout)
+					opts.WatchdogCallback(running.PID, opts.WatchdogTimeout)
 				}
 
 				// Kill the process
-				if err := cmd.Process.Kill(); err != nil {
+				if err := running.Kill(); err != nil {
 					b.log.Error("Watchdog failed to kill process",
-						slog.Int("pid", cmd.Process.Pid),
+						slog.Int("pid", running.PID),
 						slog.Any("error", err),
 					)
 				} else {
 					b.log.Info("Watchdog killed process successfully",
-						slog.Int("pid", cmd.Process.Pid),
+						slog.Int("pid", running.PID),
 					)
 				}
 			}
@@ -447,7 +435,7 @@ func (b *ClaudeCodeBackend) executeWithFromPR(ctx context.Context, opts ExecuteO
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		scanner := bufio.NewScanner(stdout)
+		scanner := bufio.NewScanner(running.Stdout)
 		// Increase buffer size for large JSON events
 		buf := make([]byte, 0, 64*1024)
 		scanner.Buffer(buf, 1024*1024)
@@ -505,7 +493,7 @@ func (b *ClaudeCodeBackend) executeWithFromPR(ctx context.Context, opts ExecuteO
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		scanner := bufio.NewScanner(stderr)
+		scanner := bufio.NewScanner(running.Stderr)
 		for scanner.Scan() {
 			line := scanner.Text()
 			stderrOutput.WriteString(line + "\n")
@@ -523,13 +511,8 @@ func (b *ClaudeCodeBackend) executeWithFromPR(ctx context.Context, opts ExecuteO
 			return
 		case <-ctx.Done():
 			// Context cancelled (timeout or explicit cancellation)
-			// exec.CommandContext will send SIGTERM/interrupt, wait grace period then SIGKILL
-			if cmd.Process == nil {
-				return
-			}
-
 			b.log.Warn("Context cancelled, waiting grace period before hard kill",
-				slog.Int("pid", cmd.Process.Pid),
+				slog.Int("pid", running.PID),
 				slog.Duration("grace_period", GracePeriod),
 			)
 
@@ -538,25 +521,23 @@ func (b *ClaudeCodeBackend) executeWithFromPR(ctx context.Context, opts ExecuteO
 			case <-cmdDone:
 				// Process exited gracefully after signal
 				b.log.Debug("Process exited gracefully after context cancellation",
-					slog.Int("pid", cmd.Process.Pid),
+					slog.Int("pid", running.PID),
 				)
 				return
 			case <-time.After(GracePeriod):
 				// Grace period expired, hard kill
-				if cmd.Process != nil {
-					b.log.Warn("Grace period expired, sending SIGKILL",
-						slog.Int("pid", cmd.Process.Pid),
+				b.log.Warn("Grace period expired, sending SIGKILL",
+					slog.Int("pid", running.PID),
+				)
+				if err := running.Kill(); err != nil {
+					b.log.Error("Failed to kill process",
+						slog.Int("pid", running.PID),
+						slog.Any("error", err),
 					)
-					if err := cmd.Process.Kill(); err != nil {
-						b.log.Error("Failed to kill process",
-							slog.Int("pid", cmd.Process.Pid),
-							slog.Any("error", err),
-						)
-					} else {
-						b.log.Info("Process killed successfully",
-							slog.Int("pid", cmd.Process.Pid),
-						)
-					}
+				} else {
+					b.log.Info("Process killed successfully",
+						slog.Int("pid", running.PID),
+					)
 				}
 			}
 		}
@@ -566,7 +547,7 @@ func (b *ClaudeCodeBackend) executeWithFromPR(ctx context.Context, opts ExecuteO
 	wg.Wait()
 
 	// Wait for command to complete
-	err = cmd.Wait()
+	err = running.Wait()
 	close(cmdDone) // Signal that command is done
 
 	if err != nil {

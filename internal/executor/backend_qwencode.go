@@ -241,30 +241,25 @@ func (b *QwenCodeBackend) buildArgs(opts ExecuteOptions) []string {
 func (b *QwenCodeBackend) Execute(ctx context.Context, opts ExecuteOptions) (*BackendResult, error) {
 	args := b.buildArgs(opts)
 
-	cmd := exec.CommandContext(ctx, b.config.Command, args...)
-	cmd.Dir = opts.ProjectPath
+	cmdRunner := opts.CommandRunner
+	if cmdRunner == nil {
+		cmdRunner = &LocalCommandRunner{}
+	}
 
 	b.log.Debug("Starting Qwen Code",
 		slog.String("command", b.config.Command),
 		slog.String("project", opts.ProjectPath),
 	)
 
-	// Create pipes for output
-	stdout, err := cmd.StdoutPipe()
+	running, err := cmdRunner.Run(ctx, CommandRunOpts{
+		Command: b.config.Command,
+		Args:    args,
+		Dir:     opts.ProjectPath,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to create stdout pipe: %w", err)
-	}
-
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return nil, fmt.Errorf("failed to create stderr pipe: %w", err)
-	}
-
-	// Start the command
-	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("failed to start Qwen Code: %w", err)
 	}
-	b.log.Debug("Qwen Code started", slog.Int("pid", cmd.Process.Pid))
+	b.log.Debug("Qwen Code started", slog.Int("pid", running.PID))
 
 	// Track results
 	result := &BackendResult{}
@@ -296,26 +291,24 @@ func (b *QwenCodeBackend) Execute(ctx context.Context, opts ExecuteOptions) (*Ba
 				age := time.Since(lastTime)
 				if age > b.heartbeatTimeout {
 					b.log.Warn("Heartbeat timeout detected, killing hung process",
-						slog.Int("pid", cmd.Process.Pid),
+						slog.Int("pid", running.PID),
 						slog.Duration("last_event_age", age),
 						slog.Duration("timeout", b.heartbeatTimeout),
 					)
 
 					if opts.HeartbeatCallback != nil {
-						opts.HeartbeatCallback(cmd.Process.Pid, age)
+						opts.HeartbeatCallback(running.PID, age)
 					}
 
-					if cmd.Process != nil {
-						if err := cmd.Process.Kill(); err != nil {
-							b.log.Error("Failed to kill hung process",
-								slog.Int("pid", cmd.Process.Pid),
-								slog.Any("error", err),
-							)
-						} else {
-							b.log.Info("Hung process killed successfully",
-								slog.Int("pid", cmd.Process.Pid),
-							)
-						}
+					if err := running.Kill(); err != nil {
+						b.log.Error("Failed to kill hung process",
+							slog.Int("pid", running.PID),
+							slog.Any("error", err),
+						)
+					} else {
+						b.log.Info("Hung process killed successfully",
+							slog.Int("pid", running.PID),
+						)
 					}
 					return
 				}
@@ -330,27 +323,23 @@ func (b *QwenCodeBackend) Execute(ctx context.Context, opts ExecuteOptions) (*Ba
 			case <-cmdDone:
 				return
 			case <-time.After(opts.WatchdogTimeout):
-				if cmd.Process == nil {
-					return
-				}
-
 				b.log.Warn("Watchdog timeout expired, forcibly killing subprocess",
-					slog.Int("pid", cmd.Process.Pid),
+					slog.Int("pid", running.PID),
 					slog.Duration("watchdog_timeout", opts.WatchdogTimeout),
 				)
 
 				if opts.WatchdogCallback != nil {
-					opts.WatchdogCallback(cmd.Process.Pid, opts.WatchdogTimeout)
+					opts.WatchdogCallback(running.PID, opts.WatchdogTimeout)
 				}
 
-				if err := cmd.Process.Kill(); err != nil {
+				if err := running.Kill(); err != nil {
 					b.log.Error("Watchdog failed to kill process",
-						slog.Int("pid", cmd.Process.Pid),
+						slog.Int("pid", running.PID),
 						slog.Any("error", err),
 					)
 				} else {
 					b.log.Info("Watchdog killed process successfully",
-						slog.Int("pid", cmd.Process.Pid),
+						slog.Int("pid", running.PID),
 					)
 				}
 			}
@@ -361,7 +350,7 @@ func (b *QwenCodeBackend) Execute(ctx context.Context, opts ExecuteOptions) (*Ba
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		scanner := bufio.NewScanner(stdout)
+		scanner := bufio.NewScanner(running.Stdout)
 		buf := make([]byte, 0, 64*1024)
 		scanner.Buffer(buf, 1024*1024)
 
@@ -408,7 +397,7 @@ func (b *QwenCodeBackend) Execute(ctx context.Context, opts ExecuteOptions) (*Ba
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		scanner := bufio.NewScanner(stderr)
+		scanner := bufio.NewScanner(running.Stderr)
 		for scanner.Scan() {
 			line := scanner.Text()
 			stderrOutput.WriteString(line + "\n")
@@ -424,36 +413,30 @@ func (b *QwenCodeBackend) Execute(ctx context.Context, opts ExecuteOptions) (*Ba
 		case <-cmdDone:
 			return
 		case <-ctx.Done():
-			if cmd.Process == nil {
-				return
-			}
-
 			b.log.Warn("Context cancelled, waiting grace period before hard kill",
-				slog.Int("pid", cmd.Process.Pid),
+				slog.Int("pid", running.PID),
 				slog.Duration("grace_period", GracePeriod),
 			)
 
 			select {
 			case <-cmdDone:
 				b.log.Debug("Process exited gracefully after context cancellation",
-					slog.Int("pid", cmd.Process.Pid),
+					slog.Int("pid", running.PID),
 				)
 				return
 			case <-time.After(GracePeriod):
-				if cmd.Process != nil {
-					b.log.Warn("Grace period expired, sending SIGKILL",
-						slog.Int("pid", cmd.Process.Pid),
+				b.log.Warn("Grace period expired, sending SIGKILL",
+					slog.Int("pid", running.PID),
+				)
+				if err := running.Kill(); err != nil {
+					b.log.Error("Failed to kill process",
+						slog.Int("pid", running.PID),
+						slog.Any("error", err),
 					)
-					if err := cmd.Process.Kill(); err != nil {
-						b.log.Error("Failed to kill process",
-							slog.Int("pid", cmd.Process.Pid),
-							slog.Any("error", err),
-						)
-					} else {
-						b.log.Info("Process killed successfully",
-							slog.Int("pid", cmd.Process.Pid),
-						)
-					}
+				} else {
+					b.log.Info("Process killed successfully",
+						slog.Int("pid", running.PID),
+					)
 				}
 			}
 		}
@@ -463,7 +446,7 @@ func (b *QwenCodeBackend) Execute(ctx context.Context, opts ExecuteOptions) (*Ba
 	wg.Wait()
 
 	// Wait for command to complete
-	err = cmd.Wait()
+	err = running.Wait()
 	close(cmdDone)
 
 	if err != nil {

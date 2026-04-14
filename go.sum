@@ -1,3 +1,5 @@
+github.com/alibaba/OpenSandbox/sdks/sandbox/go v1.0.0 h1:oqsi+3TwN7qQX1XHgk/io+fIr4KUKC6izLjah+D40q4=
+github.com/alibaba/OpenSandbox/sdks/sandbox/go v1.0.0/go.mod h1:RUNXUZnKDUAN/gIkfWcZZ1HNRJ0G6NIjGca0uMDex6I=
 github.com/aymanbagabas/go-osc52/v2 v2.0.1 h1:HwpRHbFMcZLEVr42D4p7XBqjyuxQH5SMiErDT4WkJ2k=
 github.com/aymanbagabas/go-osc52/v2 v2.0.1/go.mod h1:uYgXzlJ7ZpABp8OJ+exZzJJhRNQ2ASbcXHWsFqH8hp8=
 github.com/bep/debounce v1.2.1 h1:v67fRdBA9UQu2NhLFXrSg0Brw7CexQekrBwDMM8bzeY=

@@ -69,6 +69,11 @@ type ExecuteOptions struct {
 	// The callback receives the process PID and the watchdog timeout duration.
 	// Called BEFORE the process is killed, allowing for alert emission.
 	WatchdogCallback func(pid int, watchdogTimeout time.Duration)
+
+	// CommandRunner overrides the default command execution strategy.
+	// When nil, backends use LocalCommandRunner (local subprocess via os/exec).
+	// Set by IsolationProvider to route execution into sandboxed environments.
+	CommandRunner CommandRunner
 }
 
 // BackendEvent represents a streaming event from the backend.
@@ -246,6 +251,11 @@ type BackendConfig struct {
 
 	// Hooks contains Claude Code hooks settings for quality gates during execution
 	Hooks *HooksConfig `yaml:"hooks,omitempty"`
+
+	// Isolation configures the execution isolation backend.
+	// When set, takes precedence over legacy UseWorktree/WorktreePoolSize fields.
+	// Supported types: "none", "worktree", "opensandbox".
+	Isolation *IsolationConfig `yaml:"isolation,omitempty"`
 
 	// UseWorktree enables git worktree isolation for execution.
 	// When true, Pilot creates a temporary worktree for each task, allowing

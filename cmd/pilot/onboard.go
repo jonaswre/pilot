@@ -368,6 +368,11 @@ func buildBackendCardFromConfig(cfg *config.Config) SummaryCard {
 		card.Configured = true
 	}
 
+	if cfg.Executor != nil && cfg.Executor.Isolation != nil &&
+		cfg.Executor.Isolation.Type != "" && cfg.Executor.Isolation.Type != "none" {
+		card.Line1 = "isolation: " + cfg.Executor.Isolation.Type
+	}
+
 	return card
 }
 

@@ -1,4 +1,4 @@
-.PHONY: build run test test-e2e clean install lint fmt deps dev install-hooks check-secrets gate check-integration auto-fix test-short test-integration test-chaos test-wiring package release docker-build docker-push desktop-dev desktop-build desktop-build-windows desktop-build-linux desktop desktop-deps desktop-package desktop-dmg desktop-clean build-with-dashboard
+.PHONY: build run test test-e2e clean install lint fmt deps dev install-hooks check-secrets gate check-integration auto-fix test-short test-integration test-chaos test-wiring package release docker-build docker-build-executor docker-push desktop-dev desktop-build desktop-build-windows desktop-build-linux desktop desktop-deps desktop-package desktop-dmg desktop-clean build-with-dashboard
 
 # Variables
 BINARY_NAME=pilot
@@ -197,6 +197,13 @@ docker-build:
 		--build-arg VERSION=$(VERSION) \
 		--build-arg BUILD_TIME=$(BUILD_TIME) \
 		-t pilot:$(VERSION) \
+		.
+
+# Build executor image for OpenSandbox isolation
+docker-build-executor:
+	docker build \
+		-t pilot/executor:latest \
+		-f cloud/infra/docker/Dockerfile.executor \
 		.
 
 # Push Docker image to GitHub Container Registry

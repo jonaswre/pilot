@@ -85,6 +85,11 @@ func onboardBackendSetup(state *OnboardState) error {
 			onboardSuccessStyle.Render("✓"),
 			onboardValueStyle.Render(singleInstalled.Name))
 
+		// Isolation setup
+		if err := onboardIsolationSetup(state); err != nil {
+			return err
+		}
+
 		fmt.Println()
 		printStageFooter()
 		return nil
@@ -161,7 +166,112 @@ func onboardBackendSetup(state *OnboardState) error {
 		onboardSuccessStyle.Render("✓"),
 		onboardValueStyle.Render(selected.Name))
 
+	// Isolation setup
+	if err := onboardIsolationSetup(state); err != nil {
+		return err
+	}
+
 	fmt.Println()
 	printStageFooter()
+	return nil
+}
+
+// onboardIsolationSetup prompts the user to select an execution isolation mode
+// and configures the executor isolation settings accordingly.
+func onboardIsolationSetup(state *OnboardState) error {
+	fmt.Println()
+	fmt.Println("  Execution isolation:")
+	fmt.Println()
+
+	isolationOptions := []string{
+		"None — run locally (default)",
+		"Worktree — git worktree per task",
+		"OpenSandbox — sandboxed containers",
+	}
+
+	for i, opt := range isolationOptions {
+		defaultMarker := ""
+		if i == 0 {
+			defaultMarker = onboardDimStyle.Render(" (default)")
+		}
+		fmt.Printf("    %s %s%s\n",
+			onboardValueStyle.Render(fmt.Sprintf("[%d]", i+1)),
+			opt,
+			defaultMarker)
+	}
+	fmt.Println()
+
+	fmt.Printf("  %s ", onboardCursorStyle.Render("▸"))
+	line := readLine(state.Reader)
+
+	idx := 1
+	if line != "" {
+		if _, err := fmt.Sscanf(line, "%d", &idx); err != nil || idx < 1 || idx > len(isolationOptions) {
+			idx = 1
+		}
+	}
+
+	switch idx {
+	case 2:
+		// Worktree isolation
+		if state.Config.Executor.Isolation == nil {
+			state.Config.Executor.Isolation = &executor.IsolationConfig{}
+		}
+		state.Config.Executor.Isolation.Type = executor.IsolationTypeWorktree
+		fmt.Printf("\n  %s Isolation: %s\n",
+			onboardSuccessStyle.Render("✓"),
+			onboardValueStyle.Render("worktree"))
+
+	case 3:
+		// OpenSandbox isolation
+		if state.Config.Executor.Isolation == nil {
+			state.Config.Executor.Isolation = &executor.IsolationConfig{}
+		}
+		state.Config.Executor.Isolation.Type = executor.IsolationTypeOpenSandbox
+
+		serverURL := readLineWithDefault(state.Reader, "OpenSandbox server URL", "http://localhost:8080/v1")
+
+		fmt.Print("  API key (optional, or set OPENSANDBOX_API_KEY) ")
+		fmt.Printf("%s ", onboardCursorStyle.Render("▸"))
+		apiKey := readLine(state.Reader)
+
+		osCfg := executor.DefaultOpenSandboxConfig()
+		osCfg.ServerURL = serverURL
+		if apiKey != "" {
+			osCfg.APIKey = apiKey
+		} else {
+			osCfg.APIKey = "${OPENSANDBOX_API_KEY}"
+		}
+		osCfg.Image = "pilot/executor:latest"
+		osCfg.Resources = map[string]string{
+			"cpu":    "2000m",
+			"memory": "4Gi",
+		}
+		osCfg.Egress = &executor.EgressConfig{
+			AllowedDomains: []string{
+				"github.com",
+				"api.github.com",
+				"api.anthropic.com",
+				"registry.npmjs.org",
+				"pypi.org",
+			},
+		}
+		osCfg.EnvVars = map[string]string{
+			"ANTHROPIC_API_KEY": "${ANTHROPIC_API_KEY}",
+			"GITHUB_TOKEN":      "${GITHUB_TOKEN}",
+		}
+		state.Config.Executor.Isolation.OpenSandbox = osCfg
+
+		fmt.Printf("\n  %s Isolation: %s\n",
+			onboardSuccessStyle.Render("✓"),
+			onboardValueStyle.Render("opensandbox"))
+		fmt.Printf("  %s Build executor image: %s\n",
+			onboardDimStyle.Render("→"),
+			onboardValueStyle.Render("make docker-build-executor"))
+
+	default:
+		// None — leave isolation nil (no isolation config)
+	}
+
 	return nil
 }

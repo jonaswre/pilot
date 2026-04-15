@@ -3,10 +3,10 @@ package executor
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -62,15 +62,19 @@ func (p *OpenSandboxIsolationProvider) Prepare(ctx context.Context, opts Isolati
 	// Create lifecycle client
 	lc := opensandbox.NewLifecycleClient(p.config.ServerURL, p.config.APIKey)
 
-	// Build sandbox creation request
+	// Build sandbox creation request with required fields
+	entrypoint := p.config.Entrypoint
+	if len(entrypoint) == 0 {
+		entrypoint = []string{"tail", "-f", "/dev/null"} // Keep sandbox alive
+	}
+	resources := opensandbox.ResourceLimits(p.config.Resources)
+	if len(resources) == 0 {
+		resources = opensandbox.ResourceLimits{"cpu": "1000m", "memory": "2Gi"}
+	}
 	createReq := opensandbox.CreateSandboxRequest{
-		Image: opensandbox.ImageSpec{URI: p.config.Image},
-	}
-	if p.config.Entrypoint != nil {
-		createReq.Entrypoint = p.config.Entrypoint
-	}
-	if p.config.Resources != nil {
-		createReq.ResourceLimits = opensandbox.ResourceLimits(p.config.Resources)
+		Image:          opensandbox.ImageSpec{URI: p.config.Image},
+		Entrypoint:     entrypoint,
+		ResourceLimits: resources,
 	}
 	// Inject environment variables
 	if len(p.config.EnvVars) > 0 {
@@ -108,12 +112,51 @@ func (p *OpenSandboxIsolationProvider) Prepare(ctx context.Context, opts Isolati
 		})
 	}
 
-	// Create execd client for the sandbox
-	execd := opensandbox.NewExecdClient(p.config.ServerURL, p.config.APIKey)
+	// Resolve execd endpoint for this sandbox via server proxy.
+	// The execd service runs inside the sandbox on port 44772. Use the lifecycle
+	// server's proxy endpoint so we don't need direct container network access.
+	useProxy := true
+	execdEndpoint, err := lc.GetEndpoint(ctx, sandboxID, opensandbox.DefaultExecdPort, &useProxy)
+	if err != nil {
+		cleanup()
+		return nil, fmt.Errorf("opensandbox: failed to resolve execd endpoint: %w", err)
+	}
+	execdURL := execdEndpoint.Endpoint
+	if !strings.HasPrefix(execdURL, "http") {
+		execdURL = "http://" + execdURL
+	}
+	slog.Info("Resolved execd endpoint",
+		slog.String("sandbox_id", sandboxID),
+		slog.String("execd_url", execdURL),
+	)
+
+	// Extract access token from endpoint headers if present
+	execdToken := p.config.APIKey
+	if execdEndpoint.Headers != nil {
+		if t := execdEndpoint.Headers["X-EXECD-ACCESS-TOKEN"]; t != "" {
+			execdToken = t
+		}
+	}
+	execd := opensandbox.NewExecdClient(execdURL, execdToken)
 
 	// Configure egress policy if specified
 	if p.config.Egress != nil && len(p.config.Egress.AllowedDomains) > 0 {
-		egress := opensandbox.NewEgressClient(p.config.ServerURL, p.config.APIKey)
+		egressEndpoint, err := lc.GetEndpoint(ctx, sandboxID, opensandbox.DefaultEgressPort, &useProxy)
+		if err != nil {
+			cleanup()
+			return nil, fmt.Errorf("opensandbox: failed to resolve egress endpoint: %w", err)
+		}
+		egressURL := egressEndpoint.Endpoint
+		if !strings.HasPrefix(egressURL, "http") {
+			egressURL = "http://" + egressURL
+		}
+		egressToken := p.config.APIKey
+		if egressEndpoint.Headers != nil {
+			if t := egressEndpoint.Headers["OPENSANDBOX-EGRESS-AUTH"]; t != "" {
+				egressToken = t
+			}
+		}
+		egress := opensandbox.NewEgressClient(egressURL, egressToken)
 		rules := make([]opensandbox.NetworkRule, 0, len(p.config.Egress.AllowedDomains))
 		for _, domain := range p.config.Egress.AllowedDomains {
 			rules = append(rules, opensandbox.NetworkRule{
@@ -201,6 +244,42 @@ func getGitRemoteURL(ctx context.Context, repoPath string) (string, error) {
 	return url, nil
 }
 
+// ndjsonEvent is the JSON envelope used by OpenSandbox's execd NDJSON stream.
+// Stdout/stderr: {"type":"stdout","text":"...","timestamp":...}
+// Error:         {"type":"error","error":{"ename":"CommandExecError","evalue":"42","traceback":[...]}}
+// Complete:      {"type":"execution_complete","execution_time":13,"timestamp":...}
+type ndjsonEvent struct {
+	Type          string          `json:"type"`
+	Text          string          `json:"text"`
+	Error         *ndjsonError    `json:"error,omitempty"`
+	ExitCode      *int            `json:"exit_code,omitempty"`
+	ExecutionTime *int            `json:"execution_time,omitempty"`
+}
+
+// ndjsonError represents the error payload in execd error events.
+type ndjsonError struct {
+	Ename     string   `json:"ename"`
+	Evalue    string   `json:"evalue"`    // Exit code for CommandExecError
+	Traceback []string `json:"traceback"` // Human-readable error details
+}
+
+// parseNDJSONText extracts the text field from an NDJSON event envelope.
+// If the data is not valid JSON or has no text field, returns data as-is.
+func parseNDJSONText(data string) string {
+	var ev ndjsonEvent
+	if err := json.Unmarshal([]byte(data), &ev); err != nil {
+		return data
+	}
+	return ev.Text
+}
+
+// parseNDJSONEvent parses a full NDJSON event from the data field.
+func parseNDJSONEvent(data string) ndjsonEvent {
+	var ev ndjsonEvent
+	json.Unmarshal([]byte(data), &ev)
+	return ev
+}
+
 // runSandboxCommand runs a shell command in the sandbox and waits for completion.
 func runSandboxCommand(ctx context.Context, execd *opensandbox.ExecdClient, sandboxID, cmd string) error {
 	var cmdErr error
@@ -208,8 +287,21 @@ func runSandboxCommand(ctx context.Context, execd *opensandbox.ExecdClient, sand
 		Command: cmd,
 		Timeout: 120000, // 2 minutes
 	}, func(e opensandbox.StreamEvent) error {
-		if e.Event == "error" {
-			cmdErr = fmt.Errorf("sandbox command error: %s", e.Data)
+		switch e.Event {
+		case "error":
+			ev := parseNDJSONEvent(e.Data)
+			if ev.Error != nil && ev.Error.Ename == "CommandExecError" {
+				cmdErr = fmt.Errorf("command exited with code %s", ev.Error.Evalue)
+			} else if ev.Error != nil {
+				cmdErr = fmt.Errorf("sandbox error: %s: %s", ev.Error.Ename, ev.Error.Evalue)
+			} else {
+				cmdErr = fmt.Errorf("sandbox command error: %s", parseNDJSONText(e.Data))
+			}
+		case "execution_complete":
+			ev := parseNDJSONEvent(e.Data)
+			if ev.ExitCode != nil && *ev.ExitCode != 0 {
+				cmdErr = fmt.Errorf("command exited with code %d", *ev.ExitCode)
+			}
 		}
 		return nil
 	})
@@ -238,20 +330,8 @@ func (r *OpenSandboxCommandRunner) Run(ctx context.Context, opts CommandRunOpts)
 		cmdParts = append(cmdParts, shellQuote(arg))
 	}
 
-	// Set working directory if specified
+	// Build the command string (working directory handled via RunCommandRequest.Cwd)
 	fullCmd := strings.Join(cmdParts, " ")
-	if opts.Dir != "" {
-		fullCmd = fmt.Sprintf("cd %s && %s", shellQuote(opts.Dir), fullCmd)
-	}
-
-	// Prepend environment variables (shell-escape values)
-	if len(opts.Env) > 0 {
-		var envParts []string
-		for k, v := range opts.Env {
-			envParts = append(envParts, fmt.Sprintf("%s=%s", k, shellQuote(v)))
-		}
-		fullCmd = strings.Join(envParts, " ") + " " + fullCmd
-	}
 
 	// Create pipes for stdout and stderr
 	stdoutPR, stdoutPW := io.Pipe()
@@ -278,30 +358,48 @@ func (r *OpenSandboxCommandRunner) Run(ctx context.Context, opts CommandRunOpts)
 		// for the Wait reader.
 		err := r.execd.RunCommand(runCtx, opensandbox.RunCommandRequest{
 			Command: fullCmd,
+			Cwd:     opts.Dir,
+			Envs:    opts.Env,
 			Timeout: 0, // No timeout — controlled by backend watchdog
 		}, func(e opensandbox.StreamEvent) error {
+			// OpenSandbox execd streams NDJSON events: {"type":"stdout","text":"...","timestamp":...}
+			// The SDK parses "type" → e.Event, raw JSON → e.Data.
+			// We extract the "text" field for stdout/stderr to pass clean output to backends.
 			switch e.Event {
 			case "stdout":
-				if _, err := stdoutPW.Write([]byte(e.Data)); err != nil {
+				text := parseNDJSONText(e.Data)
+				if _, err := stdoutPW.Write([]byte(text)); err != nil {
 					return err
 				}
 			case "stderr":
-				if _, err := stderrPW.Write([]byte(e.Data)); err != nil {
+				text := parseNDJSONText(e.Data)
+				if _, err := stderrPW.Write([]byte(text)); err != nil {
 					return err
 				}
-			case "pid":
-				if v, err := strconv.Atoi(strings.TrimSpace(e.Data)); err == nil {
-					pid.Store(int32(v))
+			case "init":
+				// Init event contains session/command ID — extract PID if available
+				ev := parseNDJSONEvent(e.Data)
+				if ev.Text != "" {
+					// init text is typically the command ID, not a PID
+					slog.Debug("OpenSandbox command init", slog.String("id", ev.Text))
 				}
-			case "exit":
-				if e.Data != "0" && e.Data != "" {
+			case "execution_complete":
+				ev := parseNDJSONEvent(e.Data)
+				if ev.ExitCode != nil && *ev.ExitCode != 0 {
 					mu.Lock()
-					exitErr = fmt.Errorf("process exited with code %s", e.Data)
+					exitErr = fmt.Errorf("process exited with code %d", *ev.ExitCode)
 					mu.Unlock()
 				}
 			case "error":
+				ev := parseNDJSONEvent(e.Data)
 				mu.Lock()
-				exitErr = fmt.Errorf("sandbox error: %s", e.Data)
+				if ev.Error != nil && ev.Error.Ename == "CommandExecError" {
+					exitErr = fmt.Errorf("process exited with code %s", ev.Error.Evalue)
+				} else if ev.Error != nil {
+					exitErr = fmt.Errorf("sandbox error: %s: %s", ev.Error.Ename, ev.Error.Evalue)
+				} else {
+					exitErr = fmt.Errorf("sandbox error: %s", parseNDJSONText(e.Data))
+				}
 				mu.Unlock()
 			}
 			return nil

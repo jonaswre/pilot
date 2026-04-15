@@ -1,7 +1,13 @@
-# Pilot Cloud Executor Image
-# Sandboxed environment for task execution
+# Pilot Executor Image for OpenSandbox
+# Sandboxed environment for AI-driven task execution
+#
+# Build:  docker build -t pilot/executor:latest -f cloud/infra/docker/Dockerfile.executor .
+# Usage:  Referenced by executor.isolation.opensandbox.image in config.yaml
 
-FROM ubuntu:22.04
+FROM ubuntu:24.04
+
+# Avoid interactive prompts
+ENV DEBIAN_FRONTEND=noninteractive
 
 # Install base dependencies
 RUN apt-get update && apt-get install -y \
@@ -9,47 +15,40 @@ RUN apt-get update && apt-get install -y \
     git \
     ca-certificates \
     gnupg \
-    lsb-release \
     sudo \
     jq \
     unzip \
+    openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Node.js 20
-RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+# Install Node.js 22 (LTS)
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y nodejs \
     && npm install -g npm@latest
 
-# Install Python 3.11
+# Install Python 3.12
 RUN apt-get update && apt-get install -y \
-    python3.11 \
-    python3.11-venv \
+    python3 \
+    python3-venv \
     python3-pip \
-    && rm -rf /var/lib/apt/lists/* \
-    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1 \
-    && update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1
+    && rm -rf /var/lib/apt/lists/*
 
-# Install Go 1.22
-RUN curl -fsSL https://go.dev/dl/go1.22.0.linux-amd64.tar.gz | tar -C /usr/local -xzf - \
-    && echo 'export PATH=$PATH:/usr/local/go/bin' >> /etc/profile
-
+# Install Go 1.24
+RUN curl -fsSL https://go.dev/dl/go1.24.2.linux-amd64.tar.gz | tar -C /usr/local -xzf -
 ENV PATH=$PATH:/usr/local/go/bin
 
-# Install Rust (for some tools)
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-ENV PATH=$PATH:/root/.cargo/bin
-
 # Install GitHub CLI
-RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+    | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
     && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
-    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+    | tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
     && apt-get update \
     && apt-get install -y gh \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Claude Code CLI
-# Note: This would be the actual Claude Code installation in production
-RUN npm install -g @anthropic-ai/claude-code || true
+RUN npm install -g @anthropic-ai/claude-code
 
 # Create non-root user for execution
 RUN useradd -m -s /bin/bash pilot \
@@ -58,14 +57,12 @@ RUN useradd -m -s /bin/bash pilot \
 # Create workspace directory
 RUN mkdir -p /workspace && chown pilot:pilot /workspace
 
-# Security: Limit network access (in production, use network policies)
-# This is handled by container orchestration
+# Git config for sandbox commits
+RUN git config --system user.name "Pilot" \
+    && git config --system user.email "pilot@localhost"
 
-# Set working directory
 WORKDIR /workspace
-
-# Switch to non-root user
 USER pilot
 
-# Default command (overridden by executor)
-CMD ["sleep", "infinity"]
+# Default: keep container alive for execd commands
+CMD ["tail", "-f", "/dev/null"]

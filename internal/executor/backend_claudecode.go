@@ -351,6 +351,19 @@ func (b *ClaudeCodeBackend) executeWithFromPR(ctx context.Context, opts ExecuteO
 	var lastEventAt atomic.Int64
 	lastEventAt.Store(time.Now().UnixNano())
 
+	// Resolve effective heartbeat timeout: per-execution override takes precedence
+	// over the backend default. Allows complex tasks to tolerate longer silent periods
+	// (e.g. reading many source files before writing any output).
+	effectiveHeartbeat := b.heartbeatTimeout
+	if opts.HeartbeatTimeout > 0 {
+		if opts.HeartbeatTimeout < MinHeartbeatTimeout {
+			opts.HeartbeatTimeout = MinHeartbeatTimeout
+		} else if opts.HeartbeatTimeout > MaxHeartbeatTimeout {
+			opts.HeartbeatTimeout = MaxHeartbeatTimeout
+		}
+		effectiveHeartbeat = opts.HeartbeatTimeout
+	}
+
 	// Heartbeat monitor goroutine
 	heartbeatCtx, cancelHeartbeat := context.WithCancel(context.Background())
 	defer cancelHeartbeat()
@@ -367,11 +380,11 @@ func (b *ClaudeCodeBackend) executeWithFromPR(ctx context.Context, opts ExecuteO
 				lastNano := lastEventAt.Load()
 				lastTime := time.Unix(0, lastNano)
 				age := time.Since(lastTime)
-				if age > b.heartbeatTimeout {
+				if age > effectiveHeartbeat {
 					b.log.Warn("Heartbeat timeout detected, killing hung process",
 						slog.Int("pid", running.PID),
 						slog.Duration("last_event_age", age),
-						slog.Duration("timeout", b.heartbeatTimeout),
+						slog.Duration("timeout", effectiveHeartbeat),
 					)
 
 					// Invoke callback if provided

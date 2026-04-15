@@ -70,6 +70,12 @@ type ExecuteOptions struct {
 	// Called BEFORE the process is killed, allowing for alert emission.
 	WatchdogCallback func(pid int, watchdogTimeout time.Duration)
 
+	// HeartbeatTimeout overrides the backend's configured heartbeat timeout for
+	// this execution. Useful for scaling the timeout per task complexity — a
+	// complex task may legitimately read many files before producing any output.
+	// Zero means use the backend's default. Clamped to [MinHeartbeatTimeout, MaxHeartbeatTimeout].
+	HeartbeatTimeout time.Duration
+
 	// CommandRunner overrides the default command execution strategy.
 	// When nil, backends use LocalCommandRunner (local subprocess via os/exec).
 	// Set by IsolationProvider to route execution into sandboxed environments.

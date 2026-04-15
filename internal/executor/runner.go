@@ -1524,15 +1524,29 @@ func (r *Runner) executeWithOptions(ctx context.Context, task *Task, allowWorktr
 	// Watchdog kills subprocess after 2x timeout as a safety net for processes
 	// that ignore context cancellation.
 	watchdogTimeout := 2 * timeout
+
+	// Scale heartbeat timeout with task complexity. Complex tasks legitimately
+	// spend long stretches reading source files before producing any output;
+	// the 5-minute default fires too quickly for them.
+	// Formula: timeout/3, clamped to [DefaultHeartbeatTimeout, MaxHeartbeatTimeout].
+	// Example: trivial (15m) → 5m, medium (30m) → 10m, complex (60m) → 20m.
+	heartbeatTimeout := timeout / 3
+	if heartbeatTimeout < DefaultHeartbeatTimeout {
+		heartbeatTimeout = DefaultHeartbeatTimeout
+	} else if heartbeatTimeout > MaxHeartbeatTimeout {
+		heartbeatTimeout = MaxHeartbeatTimeout
+	}
+
 	backendResult, err := r.backend.Execute(ctx, ExecuteOptions{
-		Prompt:          prompt,
-		ProjectPath:     executionPath, // Use isolated environment path if active
-		Verbose:         task.Verbose,
-		Model:           selectedModel,
-		Effort:          selectedEffort,
-		FromPR:          task.FromPR, // GH-1267: session resumption from PR context
-		WatchdogTimeout: watchdogTimeout,
-		CommandRunner:   isolationCommandRunner,
+		Prompt:           prompt,
+		ProjectPath:      executionPath, // Use isolated environment path if active
+		Verbose:          task.Verbose,
+		Model:            selectedModel,
+		Effort:           selectedEffort,
+		FromPR:           task.FromPR, // GH-1267: session resumption from PR context
+		WatchdogTimeout:  watchdogTimeout,
+		HeartbeatTimeout: heartbeatTimeout,
+		CommandRunner:    isolationCommandRunner,
 		WatchdogCallback: func(pid int, watchdogDuration time.Duration) {
 			log.Warn("Watchdog killed subprocess",
 				slog.Int("pid", pid),
@@ -2042,12 +2056,13 @@ The previous execution completed but made no code changes. This task requires ac
 
 				// Execute retry
 				retryResult, retryErr := r.backend.Execute(ctx, ExecuteOptions{
-					Prompt:          retryPrompt,
-					ProjectPath:     task.ProjectPath,
-					Verbose:         task.Verbose,
-					Model:           selectedModel,
-					Effort:          selectedEffort,
-					WatchdogTimeout: watchdogTimeout,
+					Prompt:           retryPrompt,
+					ProjectPath:      task.ProjectPath,
+					Verbose:          task.Verbose,
+					Model:            selectedModel,
+					Effort:           selectedEffort,
+					WatchdogTimeout:  watchdogTimeout,
+					HeartbeatTimeout: heartbeatTimeout,
 					EventHandler: func(event BackendEvent) {
 						// Track tokens from retry
 						state.tokensInput += event.TokensInput

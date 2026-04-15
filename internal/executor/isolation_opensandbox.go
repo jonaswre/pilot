@@ -187,11 +187,15 @@ func (p *OpenSandboxIsolationProvider) Prepare(ctx context.Context, opts Isolati
 			setURLCmd := fmt.Sprintf("cd /workspace && git remote set-url origin %s", shellQuote(remoteURL))
 			_ = runSandboxCommand(ctx, execd, sandboxID, setURLCmd)
 			if opts.Branch != "" {
-				branchCmd := fmt.Sprintf("cd /workspace && git checkout -B %s", shellQuote(opts.Branch))
+				// Always start the new branch from the latest remote main (FETCH_HEAD)
+				// so the PR doesn't conflict with work merged while the image was stale.
+				// BaseBranch is used when explicitly set; otherwise default to origin/main.
+				base := "FETCH_HEAD"
 				if opts.BaseBranch != "" {
-					branchCmd = fmt.Sprintf("cd /workspace && git checkout -B %s FETCH_HEAD",
-						shellQuote(opts.Branch))
+					base = "origin/" + opts.BaseBranch
 				}
+				branchCmd := fmt.Sprintf("cd /workspace && git checkout -B %s %s",
+					shellQuote(opts.Branch), base)
 				if err := runSandboxCommand(ctx, execd, sandboxID, branchCmd); err != nil {
 					cleanup()
 					return nil, fmt.Errorf("opensandbox: failed to checkout branch in pre-baked repo: %w", err)

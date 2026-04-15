@@ -56,6 +56,16 @@ type OpenSandboxIsolationConfig struct {
 	// EnvVars contains additional environment variables to inject into sandboxes.
 	// Use for passing API keys, tokens, etc.
 	EnvVars map[string]string `yaml:"env_vars,omitempty"`
+
+	// AutoBuild enables automatic image building from Dockerfile.executor
+	// in the project root when the target image does not exist locally.
+	// Default: true
+	AutoBuild *bool `yaml:"auto_build,omitempty"`
+
+	// DockerfilePath is the path (relative to project root) of the
+	// Dockerfile used to build project-specific executor images.
+	// Default: "Dockerfile.executor"
+	DockerfilePath string `yaml:"dockerfile_path,omitempty"`
 }
 
 // EgressConfig configures network egress rules for sandboxed environments.
@@ -67,6 +77,7 @@ type EgressConfig struct {
 
 // DefaultOpenSandboxConfig returns sensible defaults for OpenSandbox isolation.
 func DefaultOpenSandboxConfig() *OpenSandboxIsolationConfig {
+	autoBuild := true
 	return &OpenSandboxIsolationConfig{
 		Image:   "pilot/executor:latest",
 		Timeout: 30 * time.Minute,
@@ -83,5 +94,15 @@ func DefaultOpenSandboxConfig() *OpenSandboxIsolationConfig {
 				"pypi.org",
 			},
 		},
+		AutoBuild:      &autoBuild,
+		DockerfilePath: "Dockerfile.executor",
 	}
+}
+
+// IsAutoBuildEnabled returns whether auto-build is enabled (defaults to true).
+func (c *OpenSandboxIsolationConfig) IsAutoBuildEnabled() bool {
+	if c == nil || c.AutoBuild == nil {
+		return true
+	}
+	return *c.AutoBuild
 }

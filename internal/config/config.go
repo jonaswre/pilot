@@ -175,6 +175,9 @@ type ProjectConfig struct {
 	DefaultBranch string               `yaml:"default_branch"`
 	Reviewers     []string             `yaml:"reviewers,omitempty"`
 	TeamReviewers []string             `yaml:"team_reviewers,omitempty"`
+	// ExecutorImage overrides the OpenSandbox container image for this project.
+	// When set, auto-build is skipped and this image is used directly.
+	ExecutorImage string               `yaml:"executor_image,omitempty"`
 	GitHub        *ProjectGitHubConfig `yaml:"github,omitempty"`
 	Linear        *ProjectLinearConfig `yaml:"linear,omitempty"`
 }

@@ -163,6 +163,8 @@ executor:
   #     api_key: "${OPENSANDBOX_API_KEY}"
   #     image: "pilot/executor:latest"
   #     timeout: 30m
+  #     auto_build: true           # Build project image from Dockerfile.executor if missing
+  #     dockerfile_path: "Dockerfile.executor"  # Path relative to project root
 
   # Effort routing (Opus 4.6) - controls how thoroughly Claude reasons per complexity
   # effort_routing:
@@ -259,6 +261,7 @@ projects:
     # github:
     #   owner: "my-org"
     #   repo: "my-app"
+    # executor_image: "my-org/my-app-executor:latest"  # Override OpenSandbox image for this project
     # Linear project pairing (GH-1684) - maps Linear project to this Pilot project
     # Precedence: project-level linear.project_id > workspace-level > default_project
     # linear:

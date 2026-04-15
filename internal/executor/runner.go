@@ -164,6 +164,10 @@ type Task struct {
 	// When true, BuildPrompt skips Navigator detection and uses a focused
 	// problem-solving prompt suitable for local execution.
 	LocalMode bool
+	// ExecutorImage overrides the OpenSandbox container image for this task.
+	// Set from ProjectConfig.ExecutorImage by the orchestrator.
+	// When empty, the isolation provider uses auto-build or global default.
+	ExecutorImage string
 }
 
 // QualityGateResult represents the result of a single quality gate check.
@@ -981,10 +985,12 @@ func (r *Runner) executeWithOptions(ctx context.Context, task *Task, allowWorktr
 		r.reportProgress(task.ID, "Worktree", 1, "Creating isolated environment...")
 
 		env, err := provider.Prepare(ctx, IsolationOpts{
-			TaskID:      task.ID,
-			ProjectPath: task.ProjectPath,
-			Branch:      task.Branch,
-			BaseBranch:  "",
+			TaskID:        task.ID,
+			ProjectPath:   task.ProjectPath,
+			Branch:        task.Branch,
+			BaseBranch:    "",
+			ProjectName:   filepath.Base(task.ProjectPath),
+			ExecutorImage: task.ExecutorImage,
 		})
 		if err != nil {
 			r.log.Error("Failed to create isolated environment",

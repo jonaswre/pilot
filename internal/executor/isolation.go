@@ -64,6 +64,11 @@ type IsolatedEnvironment struct {
 	// Cleanup MUST be called when execution completes (success or failure).
 	// Safe to call multiple times. Handles worktree removal, sandbox destruction, etc.
 	Cleanup func()
+
+	// NavigatorUploaded is set by providers that handle navigator setup internally
+	// (e.g. OpenSandbox uploads .agent/ via the execd file API). When true, the
+	// runner skips the host-side EnsureNavigatorInWorktree call.
+	NavigatorUploaded bool
 }
 
 // IsolationType constants for configuration.

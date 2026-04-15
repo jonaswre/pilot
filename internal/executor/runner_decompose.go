@@ -17,7 +17,7 @@ import (
 // GH-1235: executionPath is passed explicitly to handle worktree isolation.
 // When worktree mode is active, executionPath differs from parentTask.ProjectPath
 // and the branch is already checked out in the worktree, so we skip branch creation.
-func (r *Runner) executeDecomposedTask(ctx context.Context, parentTask *Task, subtasks []*Task, executionPath string) (*ExecutionResult, error) {
+func (r *Runner) executeDecomposedTask(ctx context.Context, parentTask *Task, subtasks []*Task, executionPath string, cmdRunner CommandRunner) (*ExecutionResult, error) {
 	start := time.Now()
 	totalSubtasks := len(subtasks)
 
@@ -107,6 +107,15 @@ func (r *Runner) executeDecomposedTask(ctx context.Context, parentTask *Task, su
 
 		// GH-1235: Execute subtasks in the worktree when worktree mode is active
 		subtask.ProjectPath = executionPath
+		// Inherit parent sandbox runner so subtasks execute inside the same container.
+		subtask.CommandRunner = cmdRunner
+		// Preserve the original host path for operations that run on the host
+		// (e.g. `gh pr create` cannot run inside the container).
+		if parentTask.OriginalProjectPath != "" {
+			subtask.OriginalProjectPath = parentTask.OriginalProjectPath
+		} else {
+			subtask.OriginalProjectPath = parentTask.ProjectPath
+		}
 
 		// Temporarily disable decomposer to prevent recursive decomposition
 		savedDecomposer := r.decomposer

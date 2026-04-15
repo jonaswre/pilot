@@ -3,18 +3,27 @@ package executor
 import (
 	"context"
 	"fmt"
+	"io"
 	"os/exec"
 	"strings"
+	"sync"
 )
 
 // GitOperations handles git operations for tasks
 type GitOperations struct {
-	projectPath string
+	projectPath   string
+	commandRunner CommandRunner // optional; when set, runs commands via runner (e.g. sandbox)
 }
 
 // NewGitOperations creates new git operations for a project
 func NewGitOperations(projectPath string) *GitOperations {
 	return &GitOperations{projectPath: projectPath}
+}
+
+// WithCommandRunner returns a copy of GitOperations configured to run git
+// commands through the given runner (e.g. for sandbox-based isolation).
+func (g *GitOperations) WithCommandRunner(runner CommandRunner) *GitOperations {
+	return &GitOperations{projectPath: g.projectPath, commandRunner: runner}
 }
 
 // CreateBranch creates a new branch
@@ -79,8 +88,30 @@ func (g *GitOperations) Commit(ctx context.Context, message string) (string, err
 	return strings.TrimSpace(string(output)), nil
 }
 
-// Push pushes the current branch to remote
+// Push pushes the current branch to remote.
+// When a CommandRunner is configured (e.g. sandbox), the command runs via the runner.
 func (g *GitOperations) Push(ctx context.Context, branchName string) error {
+	if g.commandRunner != nil {
+		running, err := g.commandRunner.Run(ctx, CommandRunOpts{
+			Command: "git",
+			Args:    []string{"push", "-u", "origin", branchName},
+			Dir:     g.projectPath,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to push: %w", err)
+		}
+		// Read stdout and stderr concurrently to avoid pipe deadlock.
+		var outBuf, errBuf strings.Builder
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() { defer wg.Done(); io.Copy(&outBuf, running.Stdout) }()
+		go func() { defer wg.Done(); io.Copy(&errBuf, running.Stderr) }()
+		wg.Wait()
+		if err := running.Wait(); err != nil {
+			return fmt.Errorf("failed to push: %w: %s", err, strings.TrimSpace(errBuf.String()))
+		}
+		return nil
+	}
 	cmd := exec.CommandContext(ctx, "git", "push", "-u", "origin", branchName)
 	cmd.Dir = g.projectPath
 	output, err := cmd.CombinedOutput()
@@ -90,16 +121,20 @@ func (g *GitOperations) Push(ctx context.Context, branchName string) error {
 	return nil
 }
 
-// CreatePR creates a pull request using gh CLI
-func (g *GitOperations) CreatePR(ctx context.Context, title, body, baseBranch string) (string, error) {
-	// GH-2177: Detect current branch to pass --head explicitly.
-	// In worktree mode, gh may see uncommitted changes and refuse to infer the head branch.
-	// Using --head bypasses the dirty working tree check.
-	headBranch := ""
-	if branchCmd := exec.CommandContext(ctx, "git", "rev-parse", "--abbrev-ref", "HEAD"); branchCmd != nil {
-		branchCmd.Dir = g.projectPath
-		if out, err := branchCmd.Output(); err == nil {
-			headBranch = strings.TrimSpace(string(out))
+// CreatePR creates a pull request using gh CLI.
+// headBranch, if non-empty, is passed as --head to gh; otherwise it is
+// auto-detected from the current checkout (original GH-2177 behaviour).
+// Callers in container-based isolation must pass the branch explicitly because
+// the host-side checkout may be on a different branch than what was pushed.
+func (g *GitOperations) CreatePR(ctx context.Context, title, body, baseBranch, headBranch string) (string, error) {
+	// GH-2177: Pass --head explicitly so gh doesn't rely on the checkout state.
+	// Callers may pass an empty string to fall back to auto-detection.
+	if headBranch == "" {
+		if branchCmd := exec.CommandContext(ctx, "git", "rev-parse", "--abbrev-ref", "HEAD"); branchCmd != nil {
+			branchCmd.Dir = g.projectPath
+			if out, err := branchCmd.Output(); err == nil {
+				headBranch = strings.TrimSpace(string(out))
+			}
 		}
 	}
 
@@ -127,9 +162,12 @@ func (g *GitOperations) CreatePR(ctx context.Context, title, body, baseBranch st
 		return "", fmt.Errorf("failed to create PR: %w: %s", err, output)
 	}
 
-	// Extract PR URL from output
-	prURL := strings.TrimSpace(outputStr)
-	return prURL, nil
+	// Extract PR URL from output — gh may print warnings (e.g. "Warning: N uncommitted
+	// changes") before the URL; use extractPRURL to get just the URL.
+	if url := extractPRURL(outputStr); url != "" {
+		return url, nil
+	}
+	return strings.TrimSpace(outputStr), nil
 }
 
 // extractPRURL extracts a GitHub PR URL from text
@@ -233,33 +271,58 @@ func (g *GitOperations) PushToMain(ctx context.Context) error {
 	return nil
 }
 
+// runGitOutput runs a git command and returns its stdout as a string.
+// When commandRunner is set, the command runs inside the configured runner
+// (e.g. OpenSandbox container); otherwise it runs as a local subprocess.
+func (g *GitOperations) runGitOutput(ctx context.Context, args ...string) (string, error) {
+	if g.commandRunner != nil {
+		running, err := g.commandRunner.Run(ctx, CommandRunOpts{
+			Command: "git",
+			Args:    args,
+			Dir:     g.projectPath,
+		})
+		if err != nil {
+			return "", err
+		}
+		var outBuf strings.Builder
+		io.Copy(&outBuf, running.Stdout)
+		io.Copy(io.Discard, running.Stderr)
+		if waitErr := running.Wait(); waitErr != nil {
+			return "", waitErr
+		}
+		return strings.TrimSpace(outBuf.String()), nil
+	}
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = g.projectPath
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
 // CountNewCommits returns the number of commits on the current branch
 // that are not on the base branch. Uses `git rev-list --count base..HEAD`.
 // Returns 0 if the base branch doesn't exist or there are no new commits.
 func (g *GitOperations) CountNewCommits(ctx context.Context, baseBranch string) (int, error) {
-	cmd := exec.CommandContext(ctx, "git", "rev-list", "--count", baseBranch+"..HEAD")
-	cmd.Dir = g.projectPath
-	output, err := cmd.Output()
+	output, err := g.runGitOutput(ctx, "rev-list", "--count", baseBranch+"..HEAD")
 	if err != nil {
 		return 0, fmt.Errorf("failed to count new commits: %w", err)
 	}
-	countStr := strings.TrimSpace(string(output))
 	var count int
-	if _, parseErr := fmt.Sscanf(countStr, "%d", &count); parseErr != nil {
-		return 0, fmt.Errorf("failed to parse commit count %q: %w", countStr, parseErr)
+	if _, parseErr := fmt.Sscanf(output, "%d", &count); parseErr != nil {
+		return 0, fmt.Errorf("failed to parse commit count %q: %w", output, parseErr)
 	}
 	return count, nil
 }
 
 // GetCurrentCommitSHA returns the SHA of the current HEAD commit
 func (g *GitOperations) GetCurrentCommitSHA(ctx context.Context) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", "rev-parse", "HEAD")
-	cmd.Dir = g.projectPath
-	output, err := cmd.Output()
+	sha, err := g.runGitOutput(ctx, "rev-parse", "HEAD")
 	if err != nil {
 		return "", fmt.Errorf("failed to get current commit SHA: %w", err)
 	}
-	return strings.TrimSpace(string(output)), nil
+	return sha, nil
 }
 
 // GetDiff returns the diff between the base branch and HEAD.
@@ -358,6 +421,21 @@ func (g *GitOperations) DeleteBranch(ctx context.Context, branchName string) err
 // RemoteBranchExists checks if a branch exists on the remote (origin).
 // GH-1389: Used to verify if push actually succeeded despite worktree chdir errors.
 func (g *GitOperations) RemoteBranchExists(ctx context.Context, branchName string) bool {
+	if g.commandRunner != nil {
+		running, err := g.commandRunner.Run(ctx, CommandRunOpts{
+			Command: "git",
+			Args:    []string{"ls-remote", "--heads", "origin", branchName},
+			Dir:     g.projectPath,
+		})
+		if err != nil {
+			return false
+		}
+		var outBuf strings.Builder
+		io.Copy(&outBuf, running.Stdout)
+		io.Copy(io.Discard, running.Stderr)
+		running.Wait()
+		return len(strings.TrimSpace(outBuf.String())) > 0
+	}
 	cmd := exec.CommandContext(ctx, "git", "ls-remote", "--heads", "origin", branchName)
 	cmd.Dir = g.projectPath
 	output, err := cmd.Output()

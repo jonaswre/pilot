@@ -168,6 +168,15 @@ type Task struct {
 	// Set from ProjectConfig.ExecutorImage by the orchestrator.
 	// When empty, the isolation provider uses auto-build or global default.
 	ExecutorImage string
+	// CommandRunner is set internally for subtasks executing within an existing
+	// isolated environment (e.g. OpenSandbox). When non-nil, isolation setup is
+	// skipped and this runner is used directly for both git operations and
+	// backend execution.
+	CommandRunner CommandRunner
+	// OriginalProjectPath preserves the host-side project path when ProjectPath
+	// is overridden to a container path (e.g. /workspace) for subtasks. Used for
+	// host-side operations like `gh pr create` that cannot run inside the container.
+	OriginalProjectPath string
 }
 
 // QualityGateResult represents the result of a single quality gate check.
@@ -976,7 +985,12 @@ func (r *Runner) executeWithOptions(ctx context.Context, task *Task, allowWorktr
 		slog.Bool("directCommit", task.DirectCommit),
 	)
 
-	if allowWorktree && provider.Name() != IsolationTypeNone && task.Branch != "" && !task.DirectCommit {
+	// Subtask within existing sandbox: task.CommandRunner is pre-set by executeDecomposedTask.
+	// Skip isolation creation and reuse the parent sandbox's runner directly.
+	if task.CommandRunner != nil {
+		isolationCommandRunner = task.CommandRunner
+		// executionPath is already task.ProjectPath (container path, e.g. /workspace)
+	} else if allowWorktree && provider.Name() != IsolationTypeNone && task.Branch != "" && !task.DirectCommit {
 		r.log.Info("Creating isolated environment for execution",
 			slog.String("task_id", task.ID),
 			slog.String("branch", task.Branch),
@@ -1008,17 +1022,20 @@ func (r *Runner) executeWithOptions(ctx context.Context, task *Task, allowWorktr
 		executionPath = env.WorkDir
 		isolationCommandRunner = env.CommandRunner
 
-		// Copy Navigator config to worktree (handles untracked .agent/ content)
-		if err := EnsureNavigatorInWorktree(task.ProjectPath, executionPath); err != nil {
-			r.log.Error("Failed to copy Navigator to isolated environment",
-				slog.String("task_id", task.ID),
-				slog.Any("error", err),
-			)
-			return &ExecutionResult{
-				TaskID:  task.ID,
-				Success: false,
-				Error:   fmt.Sprintf("failed to setup navigator in isolated environment: %v", err),
-			}, fmt.Errorf("navigator isolation setup failed: %w", err)
+		// Copy Navigator config to worktree (handles untracked .agent/ content).
+		// Skip if the isolation provider already uploaded navigator (e.g. OpenSandbox).
+		if !env.NavigatorUploaded {
+			if err := EnsureNavigatorInWorktree(task.ProjectPath, executionPath); err != nil {
+				r.log.Error("Failed to copy Navigator to isolated environment",
+					slog.String("task_id", task.ID),
+					slog.Any("error", err),
+				)
+				return &ExecutionResult{
+					TaskID:  task.ID,
+					Success: false,
+					Error:   fmt.Sprintf("failed to setup navigator in isolated environment: %v", err),
+				}, fmt.Errorf("navigator isolation setup failed: %w", err)
+			}
 		}
 
 		r.log.Info("Using isolated environment",
@@ -1036,8 +1053,9 @@ func (r *Runner) executeWithOptions(ctx context.Context, task *Task, allowWorktr
 	// create dirty git state after our install script commits.
 	if !r.skipPreflightChecks {
 		preflightOpts := PreflightOptions{
-			SkipGitClean: task.LocalMode || provider.Name() != IsolationTypeNone,
-			BackendType:  r.backendType(),
+			SkipGitClean:  task.LocalMode || provider.Name() != IsolationTypeNone,
+			SkipGitChecks: provider.Name() == IsolationTypeOpenSandbox || task.CommandRunner != nil,
+			BackendType:   r.backendType(),
 		}
 		if err := RunPreflightChecksWithOptions(ctx, executionPath, preflightOpts); err != nil {
 			r.log.Warn("Pre-flight check failed",
@@ -1055,7 +1073,10 @@ func (r *Runner) executeWithOptions(ctx context.Context, task *Task, allowWorktr
 	// Auto-init Navigator if configured and missing
 	// Use executionPath to check/init in worktree if worktree isolation is active
 	// Skip for LocalMode — bench/sandbox tasks don't use Navigator (GH-2108)
-	if !task.LocalMode && r.config != nil && r.config.Navigator != nil && r.config.Navigator.AutoInit {
+	// Skip for OpenSandbox — executionPath is /workspace inside container (not accessible
+	// from host), and navigator is already uploaded via execd file API in Prepare().
+	isContainerIsolation := provider.Name() == IsolationTypeOpenSandbox || task.CommandRunner != nil
+	if !task.LocalMode && !isContainerIsolation && r.config != nil && r.config.Navigator != nil && r.config.Navigator.AutoInit {
 		if err := r.maybeInitNavigator(executionPath); err != nil {
 			r.log.Warn("Navigator auto-init failed", slog.Any("error", err))
 			// Continue without Navigator - graceful degradation
@@ -1201,7 +1222,7 @@ func (r *Runner) executeWithOptions(ctx context.Context, task *Task, allowWorktr
 					epicIssueNum := strings.TrimPrefix(task.ID, "GH-")
 					prBody := fmt.Sprintf("## Summary\n\nAutomated PR created by Pilot for epic task %s.\n\nCloses #%s\n\n## Changes\n\n%s", task.ID, epicIssueNum, task.Description)
 					epicPRTitle := fmt.Sprintf("%s: %s", task.ID, task.Title)
-				prURL, prErr := epicGit.CreatePR(ctx, epicPRTitle, prBody, baseBranch)
+				prURL, prErr := epicGit.CreatePR(ctx, epicPRTitle, prBody, baseBranch, task.Branch)
 					if prErr != nil {
 						r.log.Warn("Epic PR creation failed",
 							slog.String("task_id", task.ID),
@@ -1230,7 +1251,7 @@ func (r *Runner) executeWithOptions(ctx context.Context, task *Task, allowWorktr
 				slog.Int("subtask_count", len(result.Subtasks)),
 				slog.String("reason", result.Reason),
 			)
-			return r.executeDecomposedTask(ctx, task, result.Subtasks, executionPath)
+			return r.executeDecomposedTask(ctx, task, result.Subtasks, executionPath, isolationCommandRunner)
 		}
 	}
 
@@ -1298,8 +1319,13 @@ func (r *Runner) executeWithOptions(ctx context.Context, task *Task, allowWorktr
 		Source:      "pilot",
 	})
 
-	// Initialize git operations in execution path (worktree or original)
+	// Initialize git operations in execution path (worktree or original).
+	// For container-based isolation (OpenSandbox), use the sandbox runner so
+	// git push executes inside the container, not on the host filesystem.
 	git := NewGitOperations(executionPath)
+	if isolationCommandRunner != nil && (provider.Name() == IsolationTypeOpenSandbox || task.CommandRunner != nil) {
+		git = git.WithCommandRunner(isolationCommandRunner)
+	}
 
 	// Create branch if specified (skip for direct commit mode and isolation mode)
 	// When using isolation (worktree/sandbox), the provider already created the branch
@@ -1419,20 +1445,27 @@ func (r *Runner) executeWithOptions(ctx context.Context, task *Task, allowWorktr
 	// Clean stale pilot hooks unconditionally — even when hooks.enabled is false.
 	// Prevents dead entries from accumulating after OS reboots clear temp dirs (GH-1749).
 	// Clean project root first (always), then worktree path if different (GH-1884).
-	projectSettingsPath := filepath.Join(task.ProjectPath, ".claude", "settings.json")
-	if cleanErr := CleanStalePilotHooks(projectSettingsPath); cleanErr != nil {
-		log.Warn("Failed to clean stale pilot hooks in project root", slog.Any("error", cleanErr))
-	}
-	if executionPath != task.ProjectPath {
-		worktreeSettingsPath := filepath.Join(executionPath, ".claude", "settings.json")
-		if cleanErr := CleanStalePilotHooks(worktreeSettingsPath); cleanErr != nil {
-			log.Warn("Failed to clean stale pilot hooks in worktree", slog.Any("error", cleanErr))
+	// Skip for container-based isolation — executionPath is /workspace (container),
+	// inaccessible from the host.
+	if !isContainerIsolation {
+		projectSettingsPath := filepath.Join(task.ProjectPath, ".claude", "settings.json")
+		if cleanErr := CleanStalePilotHooks(projectSettingsPath); cleanErr != nil {
+			log.Warn("Failed to clean stale pilot hooks in project root", slog.Any("error", cleanErr))
+		}
+		if executionPath != task.ProjectPath {
+			worktreeSettingsPath := filepath.Join(executionPath, ".claude", "settings.json")
+			if cleanErr := CleanStalePilotHooks(worktreeSettingsPath); cleanErr != nil {
+				log.Warn("Failed to clean stale pilot hooks in worktree", slog.Any("error", cleanErr))
+			}
 		}
 	}
 
 	// Setup Claude Code hooks if enabled (GH-1266)
+	// Skip for container-based isolation: executionPath is /workspace inside the
+	// container. Host-side MkdirAll on /workspace fails with permission denied.
+	// Hooks are not applicable in sandboxed containers anyway.
 	var hookRestoreFunc func() error
-	if r.config != nil && r.config.Hooks != nil && r.config.Hooks.Enabled {
+	if r.config != nil && r.config.Hooks != nil && r.config.Hooks.Enabled && !isContainerIsolation {
 		log.Debug("Setting up Claude Code hooks", slog.String("task_id", task.ID))
 
 		// Create temporary directory for hook scripts
@@ -1778,7 +1811,7 @@ func (r *Runner) executeWithOptions(ctx context.Context, task *Task, allowWorktr
 						log.Info("Decomposition fallback succeeded",
 							slog.String("task_id", task.ID),
 							slog.Int("subtask_count", len(decompResult.Subtasks)))
-						return r.executeDecomposedTask(ctx, task, decompResult.Subtasks, executionPath)
+						return r.executeDecomposedTask(ctx, task, decompResult.Subtasks, executionPath, isolationCommandRunner)
 					}
 				}
 			}
@@ -2648,6 +2681,22 @@ The previous execution completed but made no code changes. This task requires ac
 
 			prTitle := fmt.Sprintf("%s: %s", task.ID, task.Title)
 
+			// For container-based isolation (OpenSandbox), `gh pr create` must run on
+			// the host. Build a host-side git handle for PR creation using the original
+			// project path (which is the host filesystem path, not /workspace).
+			prGit := git
+			if task.CommandRunner != nil || (isolationCommandRunner != nil && provider.Name() == IsolationTypeOpenSandbox) {
+				hostPath := task.OriginalProjectPath
+				if hostPath == "" {
+					hostPath = task.ProjectPath // fallback: may still be /workspace for subtasks
+				}
+				// If hostPath is still the container path, use the task's original project path
+				// stored in OriginalProjectPath; otherwise use git (host path already set)
+				if hostPath != "" && hostPath != executionPath {
+					prGit = NewGitOperations(hostPath)
+				}
+			}
+
 			// Route PR/MR creation through adapter-specific creator when available
 			var prURL string
 			if r.prCreator != nil && task.SourceAdapter != "" && task.SourceAdapter != "github" {
@@ -2671,7 +2720,7 @@ The previous execution completed but made no code changes. This task requires ac
 				issueNum := strings.TrimPrefix(task.ID, "GH-")
 				prBody := fmt.Sprintf("## Summary\n\nAutomated PR created by Pilot for task %s.\n\nCloses #%s\n\n## Changes\n\n%s", task.ID, issueNum, task.Description)
 				var createErr error
-				prURL, createErr = git.CreatePR(ctx, prTitle, prBody, baseBranch)
+				prURL, createErr = prGit.CreatePR(ctx, prTitle, prBody, baseBranch, task.Branch)
 				if createErr != nil {
 					result.Success = false
 					result.Error = fmt.Sprintf("PR creation failed: %v", createErr)

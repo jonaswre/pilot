@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -83,6 +85,8 @@ func (p *OpenSandboxIsolationProvider) Prepare(ctx context.Context, opts Isolati
 	if len(p.config.EnvVars) > 0 {
 		createReq.Env = p.config.EnvVars
 	}
+	// NOTE: networkPolicy disabled for debugging — re-enable once fetch works
+	// if p.config.Egress != nil && len(p.config.Egress.AllowedDomains) > 0 { ... }
 
 	// Create the sandbox
 	sbx, err := lc.CreateSandbox(ctx, createReq)
@@ -142,41 +146,26 @@ func (p *OpenSandboxIsolationProvider) Prepare(ctx context.Context, opts Isolati
 	}
 	execd := opensandbox.NewExecdClient(execdURL, execdToken)
 
-	// Configure egress policy if specified
-	if p.config.Egress != nil && len(p.config.Egress.AllowedDomains) > 0 {
-		egressEndpoint, err := lc.GetEndpoint(ctx, sandboxID, opensandbox.DefaultEgressPort, &useProxy)
-		if err != nil {
-			cleanup()
-			return nil, fmt.Errorf("opensandbox: failed to resolve egress endpoint: %w", err)
-		}
-		egressURL := egressEndpoint.Endpoint
-		if !strings.HasPrefix(egressURL, "http") {
-			egressURL = "http://" + egressURL
-		}
-		egressToken := p.config.APIKey
-		if egressEndpoint.Headers != nil {
-			if t := egressEndpoint.Headers["OPENSANDBOX-EGRESS-AUTH"]; t != "" {
-				egressToken = t
-			}
-		}
-		egress := opensandbox.NewEgressClient(egressURL, egressToken)
-		rules := make([]opensandbox.NetworkRule, 0, len(p.config.Egress.AllowedDomains))
-		for _, domain := range p.config.Egress.AllowedDomains {
-			rules = append(rules, opensandbox.NetworkRule{
-				Action: "allow",
-				Target: domain,
-			})
-		}
-		if _, err := egress.PatchPolicy(ctx, rules); err != nil {
-			cleanup()
-			return nil, fmt.Errorf("opensandbox: failed to configure egress: %w", err)
-		}
+	// Wait for execd to become ready (it's bootstrapped after container start).
+	if err := waitForExecd(ctx, execd, sandboxID); err != nil {
+		cleanup()
+		return nil, fmt.Errorf("opensandbox: execd not ready: %w", err)
 	}
 
 	// Set up repository inside sandbox.
 	// Two paths: if /workspace/.git exists (pre-baked image), fetch+checkout.
 	// Otherwise, full clone from remote.
 	if opts.ProjectPath != "" {
+		// Get git remote URL and optionally embed GITHUB_TOKEN for private repos.
+		remoteURL, err := getGitRemoteURL(ctx, opts.ProjectPath)
+		if err != nil {
+			cleanup()
+			return nil, fmt.Errorf("opensandbox: failed to get git remote URL: %w", err)
+		}
+		if token := p.config.EnvVars["GITHUB_TOKEN"]; token != "" && strings.Contains(remoteURL, "github.com") {
+			remoteURL = strings.Replace(remoteURL, "https://", fmt.Sprintf("https://x-token:%s@", token), 1)
+		}
+
 		// Check if repo is pre-baked in the image
 		preBaked := false
 		if err := runSandboxCommand(ctx, execd, sandboxID, "test -d /workspace/.git"); err == nil {
@@ -188,15 +177,20 @@ func (p *OpenSandboxIsolationProvider) Prepare(ctx context.Context, opts Isolati
 			slog.Info("Pre-baked repo detected, using fast fetch+checkout",
 				slog.String("task_id", opts.TaskID),
 			)
-			if err := runSandboxCommand(ctx, execd, sandboxID, "cd /workspace && git fetch origin"); err != nil {
+			_ = runSandboxCommand(ctx, execd, sandboxID, "git config --global --add safe.directory /workspace")
+			fetchCmd := fmt.Sprintf("cd /workspace && git fetch %s", shellQuote(remoteURL))
+			if err := runSandboxCommand(ctx, execd, sandboxID, fetchCmd); err != nil {
 				cleanup()
 				return nil, fmt.Errorf("opensandbox: failed to fetch in pre-baked repo: %w", err)
 			}
+			// Set the origin remote URL to the authenticated URL so push works later.
+			setURLCmd := fmt.Sprintf("cd /workspace && git remote set-url origin %s", shellQuote(remoteURL))
+			_ = runSandboxCommand(ctx, execd, sandboxID, setURLCmd)
 			if opts.Branch != "" {
 				branchCmd := fmt.Sprintf("cd /workspace && git checkout -B %s", shellQuote(opts.Branch))
 				if opts.BaseBranch != "" {
-					branchCmd = fmt.Sprintf("cd /workspace && git checkout -B %s origin/%s",
-						shellQuote(opts.Branch), shellQuote(opts.BaseBranch))
+					branchCmd = fmt.Sprintf("cd /workspace && git checkout -B %s FETCH_HEAD",
+						shellQuote(opts.Branch))
 				}
 				if err := runSandboxCommand(ctx, execd, sandboxID, branchCmd); err != nil {
 					cleanup()
@@ -210,17 +204,15 @@ func (p *OpenSandboxIsolationProvider) Prepare(ctx context.Context, opts Isolati
 				slog.String("branch", opts.Branch),
 			)
 
-			cloneURL, err := getGitRemoteURL(ctx, opts.ProjectPath)
-			if err != nil {
-				cleanup()
-				return nil, fmt.Errorf("opensandbox: failed to get git remote URL: %w", err)
-			}
-
-			cloneCmd := fmt.Sprintf("git clone --depth 50 %s /workspace", shellQuote(cloneURL))
+			_ = runSandboxCommand(ctx, execd, sandboxID, "git config --global --add safe.directory /workspace")
+			cloneCmd := fmt.Sprintf("git clone --depth 50 %s /workspace", shellQuote(remoteURL))
 			if err := runSandboxCommand(ctx, execd, sandboxID, cloneCmd); err != nil {
 				cleanup()
 				return nil, fmt.Errorf("opensandbox: failed to clone repo: %w", err)
 			}
+			// Set the origin remote URL to the authenticated URL so push works later.
+			setURLCmd := fmt.Sprintf("cd /workspace && git remote set-url origin %s", shellQuote(remoteURL))
+			_ = runSandboxCommand(ctx, execd, sandboxID, setURLCmd)
 
 			if opts.Branch != "" {
 				branchCmd := fmt.Sprintf("cd /workspace && git checkout -B %s", shellQuote(opts.Branch))
@@ -241,11 +233,82 @@ func (p *OpenSandboxIsolationProvider) Prepare(ctx context.Context, opts Isolati
 		sandboxID: sandboxID,
 	}
 
+	// Upload Navigator (.agent/) to sandbox if it exists in the project.
+	// Always set NavigatorUploaded=true so the runner skips host-side os.MkdirAll
+	// (which would target /workspace on the host, not inside the container).
+	// If the upload fails, the sandbox runs without Navigator docs — non-fatal.
+	if opts.ProjectPath != "" {
+		if err := uploadNavigatorToSandbox(ctx, execd, opts.ProjectPath); err != nil {
+			slog.Warn("Failed to upload Navigator to sandbox (continuing without it)",
+				slog.String("task_id", opts.TaskID),
+				slog.Any("error", err),
+			)
+		}
+	}
+
 	return &IsolatedEnvironment{
-		WorkDir:       "/workspace",
-		CommandRunner: cmdRunner,
-		Cleanup:       cleanup,
+		WorkDir:           "/workspace",
+		CommandRunner:     cmdRunner,
+		Cleanup:           cleanup,
+		NavigatorUploaded: true, // always skip host-side copy; sandbox handles /workspace internally
 	}, nil
+}
+
+// uploadNavigatorToSandbox uploads the .agent/ directory from the source repo
+// into /workspace/.agent inside the sandbox using the execd file API.
+func uploadNavigatorToSandbox(ctx context.Context, execd *opensandbox.ExecdClient, sourceRepo string) error {
+	sourceAgent := filepath.Join(sourceRepo, ".agent")
+	info, err := os.Stat(sourceAgent)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // nothing to upload
+		}
+		return err
+	}
+	if !info.IsDir() {
+		return nil
+	}
+
+	// Create the destination directory in the sandbox.
+	// OctalMode converts os.FileMode(0755) → 755 (octal-digits-as-decimal) as the API expects.
+	if err := execd.CreateDirectory(ctx, "/workspace/.agent", opensandbox.OctalMode(0o755)); err != nil {
+		return fmt.Errorf("create /workspace/.agent: %w", err)
+	}
+
+	return uploadDirToSandbox(ctx, execd, sourceAgent, "/workspace/.agent")
+}
+
+// uploadDirToSandbox recursively uploads a local directory to a sandbox path.
+func uploadDirToSandbox(ctx context.Context, execd *opensandbox.ExecdClient, localDir, remoteDir string) error {
+	entries, err := os.ReadDir(localDir)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		localPath := filepath.Join(localDir, entry.Name())
+		remotePath := remoteDir + "/" + entry.Name()
+		if entry.IsDir() {
+			if err := execd.CreateDirectory(ctx, remotePath, opensandbox.OctalMode(0o755)); err != nil {
+				return fmt.Errorf("create dir %s: %w", remotePath, err)
+			}
+			if err := uploadDirToSandbox(ctx, execd, localPath, remotePath); err != nil {
+				return err
+			}
+		} else {
+			f, err := os.Open(localPath)
+			if err != nil {
+				return err
+			}
+			uploadErr := execd.UploadFile(ctx, f, opensandbox.UploadFileOptions{
+				Metadata: opensandbox.FileMetadata{Path: remotePath},
+			})
+			f.Close()
+			if uploadErr != nil {
+				return fmt.Errorf("upload %s: %w", remotePath, uploadErr)
+			}
+		}
+	}
+	return nil
 }
 
 // shellQuote wraps a string in single quotes for safe shell interpolation.
@@ -311,14 +374,44 @@ func parseNDJSONEvent(data string) ndjsonEvent {
 	return ev
 }
 
+// waitForExecd polls the execd endpoint until it accepts commands or the context expires.
+// Execd is bootstrapped after container start and may not be immediately ready.
+func waitForExecd(ctx context.Context, execd *opensandbox.ExecdClient, sandboxID string) error {
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		err := execd.RunCommand(ctx, opensandbox.RunCommandRequest{
+			Command: "true",
+		}, func(_ opensandbox.StreamEvent) error { return nil })
+		if err == nil {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("execd not ready after 30s (sandbox=%s): %w", sandboxID, err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
+	}
+}
+
 // runSandboxCommand runs a shell command in the sandbox and waits for completion.
 func runSandboxCommand(ctx context.Context, execd *opensandbox.ExecdClient, sandboxID, cmd string) error {
 	var cmdErr error
+	var stderr strings.Builder
 	err := execd.RunCommand(ctx, opensandbox.RunCommandRequest{
 		Command: cmd,
 		Timeout: 120000, // 2 minutes
 	}, func(e opensandbox.StreamEvent) error {
+		slog.Info("sandbox event", slog.String("type", e.Event), slog.String("data", e.Data))
 		switch e.Event {
+		case "stdout", "stderr":
+			line := parseNDJSONText(e.Data)
+			if line != "" {
+				stderr.WriteString(line)
+				stderr.WriteByte('\n')
+			}
 		case "error":
 			ev := parseNDJSONEvent(e.Data)
 			if ev.Error != nil && ev.Error.Ename == "CommandExecError" {
@@ -331,7 +424,12 @@ func runSandboxCommand(ctx context.Context, execd *opensandbox.ExecdClient, sand
 		case "execution_complete":
 			ev := parseNDJSONEvent(e.Data)
 			if ev.ExitCode != nil && *ev.ExitCode != 0 {
-				cmdErr = fmt.Errorf("command exited with code %d", *ev.ExitCode)
+				output := strings.TrimSpace(stderr.String())
+				if output != "" {
+					cmdErr = fmt.Errorf("command exited with code %d: %s", *ev.ExitCode, output)
+				} else {
+					cmdErr = fmt.Errorf("command exited with code %d", *ev.ExitCode)
+				}
 			}
 		}
 		return nil

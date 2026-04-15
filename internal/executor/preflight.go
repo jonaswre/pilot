@@ -40,6 +40,11 @@ type PreflightOptions struct {
 	// is enabled, as the worktree is always clean (created from a commit).
 	SkipGitClean bool
 
+	// SkipGitChecks skips all git-related checks (git_clean + git_repo). Use
+	// this for container-based isolation (e.g. OpenSandbox) where the project
+	// path is inside the container and not accessible from the host filesystem.
+	SkipGitChecks bool
+
 	// BackendType specifies the configured backend ("claude-code", "opencode", "qwen-code").
 	// When set, the CLI availability check matches the active backend instead of
 	// always requiring 'claude'.
@@ -77,7 +82,15 @@ func RunPreflightChecksWithOptions(ctx context.Context, projectPath string, opts
 		checks = filtered
 	}
 
-	if opts.SkipGitClean {
+	if opts.SkipGitChecks {
+		var filtered []PreflightCheck
+		for _, c := range checks {
+			if c.Name != "git_clean" && c.Name != "git_repo" {
+				filtered = append(filtered, c)
+			}
+		}
+		checks = filtered
+	} else if opts.SkipGitClean {
 		var filtered []PreflightCheck
 		for _, c := range checks {
 			if c.Name != "git_clean" {

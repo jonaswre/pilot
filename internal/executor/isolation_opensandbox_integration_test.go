@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -189,4 +190,63 @@ func TestOpenSandboxIntegration(t *testing.T) {
 		env.Cleanup()
 		env.Cleanup()
 	})
+
+	t.Run("AutoBuildAndSmartClone", func(t *testing.T) {
+		// Create a temp dir with a minimal Dockerfile.executor and fake git repo
+		tmpDir := t.TempDir()
+
+		// Init a git repo so getGitRemoteURL works
+		if err := runLocalCmd(ctx, tmpDir, "git", "init"); err != nil {
+			t.Fatalf("git init failed: %v", err)
+		}
+		if err := runLocalCmd(ctx, tmpDir, "git", "remote", "add", "origin", "https://github.com/octocat/Hello-World.git"); err != nil {
+			t.Fatalf("git remote add failed: %v", err)
+		}
+
+		// Write a simple Dockerfile.executor
+		dockerfile := "FROM python:3.11-slim\nRUN mkdir -p /workspace && git init /workspace\nWORKDIR /workspace\n"
+		if err := os.WriteFile(filepath.Join(tmpDir, "Dockerfile.executor"), []byte(dockerfile), 0644); err != nil {
+			t.Fatalf("write Dockerfile.executor: %v", err)
+		}
+
+		autoBuild := true
+		abConfig := &OpenSandboxIsolationConfig{
+			ServerURL: "http://localhost:8080/v1",
+			Image:     "python:3.11-slim",
+			Timeout:   5 * time.Minute,
+			Resources: map[string]string{"cpu": "500m", "memory": "512Mi"},
+			AutoBuild: &autoBuild,
+		}
+
+		provider := NewOpenSandboxIsolationProvider(abConfig)
+		env, err := provider.Prepare(ctx, IsolationOpts{
+			TaskID:      "test-autobuild-1",
+			ProjectPath: tmpDir,
+			ProjectName: "test-autobuild",
+		})
+		if err != nil {
+			t.Fatalf("Prepare with auto-build failed: %v", err)
+		}
+		defer env.Cleanup()
+
+		// Verify the image was built
+		if !executorImageExists(ctx, "pilot-executor/test-autobuild:latest") {
+			t.Error("expected auto-built image to exist")
+		}
+	})
+}
+
+func runLocalCmd(ctx context.Context, dir, command string, args ...string) error {
+	runner := &LocalCommandRunner{}
+	running, err := runner.Run(ctx, CommandRunOpts{
+		Command: command,
+		Args:    args,
+		Dir:     dir,
+	})
+	if err != nil {
+		return err
+	}
+	io.Copy(io.Discard, running.Stdout)
+	io.Copy(io.Discard, running.Stderr)
+	return running.Wait()
 }

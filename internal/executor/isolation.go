@@ -37,6 +37,15 @@ type IsolationOpts struct {
 
 	// BaseBranch is the base branch for branching (e.g., "main")
 	BaseBranch string
+
+	// ProjectName is the project name, used for auto-built image naming.
+	// Derived from ProjectConfig.Name or filepath.Base(ProjectPath).
+	ProjectName string
+
+	// ExecutorImage overrides the sandbox image for this task.
+	// Set from ProjectConfig.ExecutorImage when available.
+	// When empty, image resolution falls back to auto-build or global default.
+	ExecutorImage string
 }
 
 // IsolatedEnvironment is the result of IsolationProvider.Prepare().

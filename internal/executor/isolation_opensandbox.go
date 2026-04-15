@@ -494,14 +494,26 @@ func (r *OpenSandboxCommandRunner) Run(ctx context.Context, opts CommandRunOpts)
 			// OpenSandbox execd streams NDJSON events: {"type":"stdout","text":"...","timestamp":...}
 			// The SDK parses "type" → e.Event, raw JSON → e.Data.
 			// We extract the "text" field for stdout/stderr to pass clean output to backends.
+			//
+			// IMPORTANT: execd strips the trailing newline from each stdout line before
+			// encoding it into the "text" JSON field. Without a trailing '\n' the backend's
+			// bufio.Scanner never completes a line, so the heartbeat timestamp never updates
+			// and the watchdog kills the process after its timeout regardless of actual
+			// output. Always ensure each stdout write ends with '\n'.
 			switch e.Event {
 			case "stdout":
 				text := parseNDJSONText(e.Data)
+				if !strings.HasSuffix(text, "\n") {
+					text += "\n"
+				}
 				if _, err := stdoutPW.Write([]byte(text)); err != nil {
 					return err
 				}
 			case "stderr":
 				text := parseNDJSONText(e.Data)
+				if !strings.HasSuffix(text, "\n") {
+					text += "\n"
+				}
 				if _, err := stderrPW.Write([]byte(text)); err != nil {
 					return err
 				}

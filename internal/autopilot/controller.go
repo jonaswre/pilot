@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"os/exec"
 	"regexp"
 	"strconv"
@@ -1493,12 +1494,26 @@ func (c *Controller) handleMergeConflict(ctx context.Context, prState *PRState) 
 	return nil
 }
 
-// localGitRebase performs a git rebase of branchName onto the default branch
-// using the local repo at c.localRepoPath. On success, force-pushes the result.
+// localGitRebase rebases branchName onto the default branch using a throwaway
+// clone. This avoids touching the user's working tree (dirty state, stash issues).
+// The temp directory is cleaned up on return regardless of outcome.
+//
+// Strategy: try clean rebase first. If conflicts, abort and retry with -X theirs
+// (auto-resolve favoring the PR branch). The PR contains Pilot's new work which
+// should take precedence over whatever landed on main in the meantime. This handles
+// add/add conflicts (same file created on both branches) and edit/edit conflicts
+// where the PR's version is authoritative.
 func (c *Controller) localGitRebase(ctx context.Context, branchName string) error {
-	run := func(args ...string) error {
+	// Create temp dir for a lightweight clone
+	tmpDir, err := os.MkdirTemp("", "pilot-rebase-*")
+	if err != nil {
+		return fmt.Errorf("mkdtemp: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	run := func(dir string, args ...string) error {
 		cmd := exec.CommandContext(ctx, "git", args...)
-		cmd.Dir = c.localRepoPath
+		cmd.Dir = dir
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			return fmt.Errorf("%s: %s", err, strings.TrimSpace(string(out)))
@@ -1506,34 +1521,50 @@ func (c *Controller) localGitRebase(ctx context.Context, branchName string) erro
 		return nil
 	}
 
-	// Fetch latest from remote
-	if err := run("fetch", "origin"); err != nil {
-		return fmt.Errorf("fetch: %w", err)
+	// Get remote URL from the local repo
+	remoteCmd := exec.CommandContext(ctx, "git", "remote", "get-url", "origin")
+	remoteCmd.Dir = c.localRepoPath
+	remoteOut, err := remoteCmd.Output()
+	if err != nil {
+		return fmt.Errorf("get remote url: %w", err)
+	}
+	remoteURL := strings.TrimSpace(string(remoteOut))
+
+	// Clone into temp dir
+	if err := run(tmpDir, "clone", "--no-checkout", remoteURL, tmpDir); err != nil {
+		return fmt.Errorf("clone: %w", err)
 	}
 
-	// Checkout the PR branch (detached is fine, we just need the ref)
-	if err := run("checkout", branchName); err != nil {
-		// Branch may not exist locally — try remote tracking
-		if err2 := run("checkout", "-b", branchName, "origin/"+branchName); err2 != nil {
-			return fmt.Errorf("checkout: %w", err2)
+	// Fetch the PR branch
+	if err := run(tmpDir, "fetch", "origin", branchName+":"+branchName); err != nil {
+		return fmt.Errorf("fetch branch: %w", err)
+	}
+
+	// Checkout the PR branch
+	if err := run(tmpDir, "checkout", branchName); err != nil {
+		return fmt.Errorf("checkout: %w", err)
+	}
+
+	// Try 1: clean rebase
+	if err := run(tmpDir, "rebase", "origin/main"); err != nil {
+		_ = run(tmpDir, "rebase", "--abort")
+
+		// Try 2: rebase with -X theirs (auto-resolve favoring PR's version).
+		// In rebase context: "theirs" = the commits being replayed (PR branch),
+		// so this keeps Pilot's new work over whatever landed on main.
+		c.log.Info("clean rebase failed, retrying with -X theirs",
+			"pr_branch", branchName,
+		)
+		if err := run(tmpDir, "rebase", "-X", "theirs", "origin/main"); err != nil {
+			_ = run(tmpDir, "rebase", "--abort")
+			return fmt.Errorf("rebase -X theirs: %w", err)
 		}
 	}
 
-	// Rebase onto origin/main (or whatever the default branch is)
-	defaultBranch := "main"
-	if err := run("rebase", "origin/"+defaultBranch); err != nil {
-		// Abort the failed rebase to leave repo clean
-		_ = run("rebase", "--abort")
-		return fmt.Errorf("rebase: %w", err)
-	}
-
 	// Force-push the rebased branch
-	if err := run("push", "--force-with-lease", "origin", branchName); err != nil {
+	if err := run(tmpDir, "push", "--force-with-lease", "origin", branchName); err != nil {
 		return fmt.Errorf("push: %w", err)
 	}
-
-	// Return to default branch to avoid leaving repo on PR branch
-	_ = run("checkout", defaultBranch)
 
 	return nil
 }

@@ -1352,13 +1352,17 @@ func runPollingMode(cfg *config.Config, projectPath string, replace, dashboardMo
 				if _, exists := autopilotControllers[repoFullName]; exists {
 					continue // Skip duplicates
 				}
+				projOpts := append([]autopilot.ControllerOption{}, autopilotBoardOpts...)
+				if proj.Path != "" {
+					projOpts = append(projOpts, autopilot.WithLocalRepoPath(proj.Path))
+				}
 				controller := autopilot.NewController(
 					cfg.Orchestrator.Autopilot,
 					ghClient,
 					approvalMgr,
 					proj.GitHub.Owner,
 					proj.GitHub.Repo,
-					autopilotBoardOpts...,
+					projOpts...,
 				)
 				autopilotControllers[repoFullName] = controller
 				logging.WithComponent("autopilot").Info("created controller for project",

@@ -95,6 +95,7 @@ const (
 	LabelDone       = "pilot-done"
 	LabelFailed     = "pilot-failed"
 	LabelRetryReady = "pilot-retry-ready" // PR closed without merge, issue ready for retry
+	LabelBlocked    = "pilot/blocked"     // Needs human intervention (e.g. unresolvable merge conflict)
 )
 
 // Priority mapping from GitHub labels

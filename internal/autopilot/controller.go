@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
@@ -83,6 +84,14 @@ func WithProjectBoardSync(bs *github.ProjectBoardSync, doneStatus, failStatus st
 	}
 }
 
+// WithLocalRepoPath sets the local filesystem path for git rebase operations.
+// When set, handleMergeConflict falls back to local git rebase before giving up.
+func WithLocalRepoPath(path string) ControllerOption {
+	return func(c *Controller) {
+		c.localRepoPath = path
+	}
+}
+
 // Controller orchestrates the autopilot loop for PR processing.
 // It manages the state machine: PR created → CI check → merge → post-merge CI → feedback loop.
 type Controller struct {
@@ -132,6 +141,10 @@ type Controller struct {
 	// Owner and repo for GitHub operations
 	owner string
 	repo  string
+
+	// localRepoPath is the filesystem path to the local clone.
+	// Used for local git rebase when GitHub API UpdateBranch fails.
+	localRepoPath string
 }
 
 // NewController creates an autopilot controller with all required components.
@@ -1418,9 +1431,15 @@ func (c *Controller) isMergeConflict(pr *github.PullRequest) bool {
 	return false
 }
 
-// handleMergeConflict tries to auto-rebase the PR branch first. If that fails,
-// falls back to closing the PR and returning the issue to the queue.
-// GH-1796: Saves ~$8-15 per run by avoiding full re-execution for trivial conflicts.
+// handleMergeConflict resolves merge conflicts without discarding work.
+//
+// Strategy (escalating):
+//  1. GitHub API UpdateBranch (merge-from-base) — fast, no local access needed
+//  2. Local git rebase — handles real conflicts if localRepoPath is set
+//  3. Keep branch, label pilot/blocked — human intervention needed
+//
+// Previous behaviour deleted the branch and re-executed from scratch, wasting
+// 30-60 min of work and ~$15 API costs for epic decomposed tasks.
 func (c *Controller) handleMergeConflict(ctx context.Context, prState *PRState) error {
 	c.log.Warn("merge conflict detected",
 		"pr", prState.PRNumber,
@@ -1428,36 +1447,94 @@ func (c *Controller) handleMergeConflict(ctx context.Context, prState *PRState) 
 		"branch", prState.BranchName,
 	)
 
-	// Try GitHub auto-update first (merge-from-base, not true rebase)
+	// Strategy 1: GitHub API merge-from-base (fastest, no local access)
 	err := c.ghClient.UpdatePullRequestBranch(ctx, c.owner, c.repo, prState.PRNumber)
 	if err == nil {
-		c.log.Info("auto-rebased conflicting PR", "pr", prState.PRNumber)
-		prState.Stage = StageWaitingCI // rebase triggers new CI
-		prState.HeadSHA = ""           // force refresh on next tick
+		c.log.Info("auto-rebased conflicting PR via GitHub API", "pr", prState.PRNumber)
+		prState.Stage = StageWaitingCI
+		prState.HeadSHA = "" // force refresh on next tick
 		return nil
 	}
-	c.log.Warn("auto-rebase failed, closing PR for retry", "pr", prState.PRNumber, "error", err)
+	c.log.Warn("GitHub API rebase failed", "pr", prState.PRNumber, "error", err)
 
-	// Add comment explaining the closure
-	comment := "Merge conflict detected. Auto-rebase failed — closing PR so the issue can be re-executed from updated main."
+	// Strategy 2: Local git rebase (handles real conflicts that merge-from-base can't)
+	if c.localRepoPath != "" && prState.BranchName != "" {
+		if rebaseErr := c.localGitRebase(ctx, prState.BranchName); rebaseErr == nil {
+			c.log.Info("local git rebase succeeded", "pr", prState.PRNumber, "branch", prState.BranchName)
+			prState.Stage = StageWaitingCI
+			prState.HeadSHA = "" // force refresh on next tick
+
+			comment := "Merge conflict resolved via local git rebase."
+			c.ghClient.AddPRComment(ctx, c.owner, c.repo, prState.PRNumber, comment)
+			return nil
+		} else {
+			c.log.Warn("local git rebase also failed", "pr", prState.PRNumber, "error", rebaseErr)
+		}
+	}
+
+	// Strategy 3: Keep the branch, mark as blocked — don't destroy the work.
+	comment := "Merge conflict detected. Both API update and local rebase failed — keeping branch for manual resolution.\n\nTo resolve:\n```bash\ngit checkout " + prState.BranchName + "\ngit rebase main\n# fix conflicts\ngit push --force-with-lease\n```"
 	if _, err := c.ghClient.AddPRComment(ctx, c.owner, c.repo, prState.PRNumber, comment); err != nil {
 		c.log.Warn("failed to comment on conflicting PR", "pr", prState.PRNumber, "error", err)
 	}
 
-	// Close the PR
-	if err := c.ghClient.ClosePullRequest(ctx, c.owner, c.repo, prState.PRNumber); err != nil {
-		c.log.Warn("failed to close conflicting PR", "pr", prState.PRNumber, "error", err)
-	}
-
-	// Remove pilot-in-progress label from the issue so poller can re-pick it
+	// Label the issue as blocked instead of re-queuing for execution
 	if prState.IssueNumber > 0 {
 		if err := c.ghClient.RemoveLabel(ctx, c.owner, c.repo, prState.IssueNumber, github.LabelInProgress); err != nil {
 			c.log.Warn("failed to remove in-progress label", "issue", prState.IssueNumber, "error", err)
 		}
+		if err := c.ghClient.AddLabels(ctx, c.owner, c.repo, prState.IssueNumber, []string{github.LabelBlocked}); err != nil {
+			c.log.Warn("failed to add blocked label", "issue", prState.IssueNumber, "error", err)
+		}
 	}
 
 	prState.Stage = StageFailed
-	prState.Error = "merge conflict with base branch"
+	prState.Error = "merge conflict with base branch (branch preserved)"
+	return nil
+}
+
+// localGitRebase performs a git rebase of branchName onto the default branch
+// using the local repo at c.localRepoPath. On success, force-pushes the result.
+func (c *Controller) localGitRebase(ctx context.Context, branchName string) error {
+	run := func(args ...string) error {
+		cmd := exec.CommandContext(ctx, "git", args...)
+		cmd.Dir = c.localRepoPath
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("%s: %s", err, strings.TrimSpace(string(out)))
+		}
+		return nil
+	}
+
+	// Fetch latest from remote
+	if err := run("fetch", "origin"); err != nil {
+		return fmt.Errorf("fetch: %w", err)
+	}
+
+	// Checkout the PR branch (detached is fine, we just need the ref)
+	if err := run("checkout", branchName); err != nil {
+		// Branch may not exist locally — try remote tracking
+		if err2 := run("checkout", "-b", branchName, "origin/"+branchName); err2 != nil {
+			return fmt.Errorf("checkout: %w", err2)
+		}
+	}
+
+	// Rebase onto origin/main (or whatever the default branch is)
+	defaultBranch := "main"
+	if err := run("rebase", "origin/"+defaultBranch); err != nil {
+		// Abort the failed rebase to leave repo clean
+		_ = run("rebase", "--abort")
+		return fmt.Errorf("rebase: %w", err)
+	}
+
+	// Force-push the rebased branch
+	if err := run("push", "--force-with-lease", "origin", branchName); err != nil {
+		return fmt.Errorf("push: %w", err)
+	}
+
+	// Return to default branch to avoid leaving repo on PR branch
+	_ = run("checkout", defaultBranch)
+
 	return nil
 }
 
@@ -1477,13 +1554,18 @@ func (c *Controller) removePR(prNumber int) {
 	delete(c.prFailures, prNumber)
 	c.mu.Unlock()
 
-	// Clean up remote branch for closed/failed PRs (merged PRs already handled in handleMerging)
-	if branchName != "" && c.ghClient != nil {
+	// Clean up remote branch for closed/failed PRs (merged PRs already handled in handleMerging).
+	// Skip branch deletion if the PR failed due to merge conflict — the branch contains
+	// valuable work that shouldn't be discarded.
+	isConflictFailure := ok && prState.Error == "merge conflict with base branch (branch preserved)"
+	if branchName != "" && c.ghClient != nil && !isConflictFailure {
 		if err := c.ghClient.DeleteBranch(context.Background(), c.owner, c.repo, branchName); err != nil {
 			c.log.Debug("branch cleanup on PR removal", "branch", branchName, "pr", prNumber, "error", err)
 		} else {
 			c.log.Info("deleted branch on PR removal", "branch", branchName, "pr", prNumber)
 		}
+	} else if isConflictFailure {
+		c.log.Info("preserving branch with conflict (contains work)", "branch", branchName, "pr", prNumber)
 	}
 
 	c.persistRemovePR(prNumber)

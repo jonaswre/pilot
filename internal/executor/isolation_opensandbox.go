@@ -53,10 +53,13 @@ func (p *OpenSandboxIsolationProvider) Prepare(ctx context.Context, opts Isolati
 		return nil, fmt.Errorf("opensandbox: server_url not configured")
 	}
 
+	// Resolve which image to use (per-project override > auto-built > global default)
+	resolvedImage := resolveExecutorImage(ctx, p.config, opts)
+
 	slog.Info("Creating OpenSandbox isolation",
 		slog.String("task_id", opts.TaskID),
 		slog.String("server", p.config.ServerURL),
-		slog.String("image", p.config.Image),
+		slog.String("image", resolvedImage),
 	)
 
 	// Create lifecycle client
@@ -72,7 +75,7 @@ func (p *OpenSandboxIsolationProvider) Prepare(ctx context.Context, opts Isolati
 		resources = opensandbox.ResourceLimits{"cpu": "1000m", "memory": "2Gi"}
 	}
 	createReq := opensandbox.CreateSandboxRequest{
-		Image:          opensandbox.ImageSpec{URI: p.config.Image},
+		Image:          opensandbox.ImageSpec{URI: resolvedImage},
 		Entrypoint:     entrypoint,
 		ResourceLimits: resources,
 	}
@@ -170,37 +173,65 @@ func (p *OpenSandboxIsolationProvider) Prepare(ctx context.Context, opts Isolati
 		}
 	}
 
-	// Clone repository inside sandbox
+	// Set up repository inside sandbox.
+	// Two paths: if /workspace/.git exists (pre-baked image), fetch+checkout.
+	// Otherwise, full clone from remote.
 	if opts.ProjectPath != "" {
-		slog.Info("Cloning repository in sandbox",
-			slog.String("project", opts.ProjectPath),
-			slog.String("branch", opts.Branch),
-		)
-
-		// Get remote URL from project path
-		cloneURL, err := getGitRemoteURL(ctx, opts.ProjectPath)
-		if err != nil {
-			cleanup()
-			return nil, fmt.Errorf("opensandbox: failed to get git remote URL: %w", err)
+		// Check if repo is pre-baked in the image
+		preBaked := false
+		if err := runSandboxCommand(ctx, execd, sandboxID, "test -d /workspace/.git"); err == nil {
+			preBaked = true
 		}
 
-		// Clone into /workspace (shell-escape URL to prevent injection)
-		cloneCmd := fmt.Sprintf("git clone --depth 50 %s /workspace", shellQuote(cloneURL))
-		if err := runSandboxCommand(ctx, execd, sandboxID, cloneCmd); err != nil {
-			cleanup()
-			return nil, fmt.Errorf("opensandbox: failed to clone repo: %w", err)
-		}
-
-		// Create and checkout branch if specified (shell-escape branch names)
-		if opts.Branch != "" {
-			branchCmd := fmt.Sprintf("cd /workspace && git checkout -B %s", shellQuote(opts.Branch))
-			if opts.BaseBranch != "" {
-				branchCmd = fmt.Sprintf("cd /workspace && git fetch origin %s && git checkout -B %s origin/%s",
-					shellQuote(opts.BaseBranch), shellQuote(opts.Branch), shellQuote(opts.BaseBranch))
-			}
-			if err := runSandboxCommand(ctx, execd, sandboxID, branchCmd); err != nil {
+		if preBaked {
+			// Fast path: repo pre-baked, just fetch latest and checkout branch
+			slog.Info("Pre-baked repo detected, using fast fetch+checkout",
+				slog.String("task_id", opts.TaskID),
+			)
+			if err := runSandboxCommand(ctx, execd, sandboxID, "cd /workspace && git fetch origin"); err != nil {
 				cleanup()
-				return nil, fmt.Errorf("opensandbox: failed to create branch: %w", err)
+				return nil, fmt.Errorf("opensandbox: failed to fetch in pre-baked repo: %w", err)
+			}
+			if opts.Branch != "" {
+				branchCmd := fmt.Sprintf("cd /workspace && git checkout -B %s", shellQuote(opts.Branch))
+				if opts.BaseBranch != "" {
+					branchCmd = fmt.Sprintf("cd /workspace && git checkout -B %s origin/%s",
+						shellQuote(opts.Branch), shellQuote(opts.BaseBranch))
+				}
+				if err := runSandboxCommand(ctx, execd, sandboxID, branchCmd); err != nil {
+					cleanup()
+					return nil, fmt.Errorf("opensandbox: failed to checkout branch in pre-baked repo: %w", err)
+				}
+			}
+		} else {
+			// Full clone path (generic image without pre-baked repo)
+			slog.Info("Cloning repository in sandbox",
+				slog.String("project", opts.ProjectPath),
+				slog.String("branch", opts.Branch),
+			)
+
+			cloneURL, err := getGitRemoteURL(ctx, opts.ProjectPath)
+			if err != nil {
+				cleanup()
+				return nil, fmt.Errorf("opensandbox: failed to get git remote URL: %w", err)
+			}
+
+			cloneCmd := fmt.Sprintf("git clone --depth 50 %s /workspace", shellQuote(cloneURL))
+			if err := runSandboxCommand(ctx, execd, sandboxID, cloneCmd); err != nil {
+				cleanup()
+				return nil, fmt.Errorf("opensandbox: failed to clone repo: %w", err)
+			}
+
+			if opts.Branch != "" {
+				branchCmd := fmt.Sprintf("cd /workspace && git checkout -B %s", shellQuote(opts.Branch))
+				if opts.BaseBranch != "" {
+					branchCmd = fmt.Sprintf("cd /workspace && git fetch origin %s && git checkout -B %s origin/%s",
+						shellQuote(opts.BaseBranch), shellQuote(opts.Branch), shellQuote(opts.BaseBranch))
+				}
+				if err := runSandboxCommand(ctx, execd, sandboxID, branchCmd); err != nil {
+					cleanup()
+					return nil, fmt.Errorf("opensandbox: failed to create branch: %w", err)
+				}
 			}
 		}
 	}

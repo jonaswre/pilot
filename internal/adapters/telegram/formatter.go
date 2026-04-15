@@ -426,11 +426,10 @@ func escapeMarkdown(text string) string {
 	return replacer.Replace(text)
 }
 
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
+// sanitizeCodeBlock strips backtick sequences from text destined for a
+// Markdown code block, preventing premature block termination.
+func sanitizeCodeBlock(text string) string {
+	return strings.ReplaceAll(text, "`", "'")
 }
 
 // truncateDescription truncates a string to maxLen

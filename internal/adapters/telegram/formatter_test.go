@@ -615,25 +615,6 @@ func TestParseTableRow(t *testing.T) {
 	}
 }
 
-// TestMin tests the min helper function
-func TestMin(t *testing.T) {
-	tests := []struct {
-		a, b, expected int
-	}{
-		{1, 2, 1},
-		{2, 1, 1},
-		{0, 0, 0},
-		{-1, 1, -1},
-		{100, 50, 50},
-	}
-
-	for _, tt := range tests {
-		got := min(tt.a, tt.b)
-		if got != tt.expected {
-			t.Errorf("min(%d, %d) = %d, want %d", tt.a, tt.b, got, tt.expected)
-		}
-	}
-}
 
 // TestFormatSuccessResultWithFiles tests output with file operations
 func TestFormatSuccessResultWithFiles(t *testing.T) {
@@ -791,6 +772,45 @@ Created g.go`
 	count := strings.Count(got, "Created:")
 	if count != 5 {
 		t.Errorf("extractSummary() has %d items, want 5", count)
+	}
+}
+
+// TestSanitizeCodeBlock tests backtick stripping for code blocks
+func TestSanitizeCodeBlock(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "no backticks",
+			input:    "plain error message",
+			expected: "plain error message",
+		},
+		{
+			name:     "single backtick",
+			input:    "error in `foo`",
+			expected: "error in 'foo'",
+		},
+		{
+			name:     "triple backtick breaks code block",
+			input:    "output:\n```\nstuff\n```",
+			expected: "output:\n'''\nstuff\n'''",
+		},
+		{
+			name:     "empty string",
+			input:    "",
+			expected: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := sanitizeCodeBlock(tt.input)
+			if got != tt.expected {
+				t.Errorf("sanitizeCodeBlock(%q) = %q, want %q", tt.input, got, tt.expected)
+			}
+		})
 	}
 }
 

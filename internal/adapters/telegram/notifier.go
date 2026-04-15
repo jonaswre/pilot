@@ -118,7 +118,7 @@ func (n *Notifier) TaskFailed(ctx context.Context, taskID, title, errorMsg strin
 	if n.plainTextMode {
 		text = fmt.Sprintf("❌ Pilot task failed\n%s %s\n\n%s", taskID, title, errorMsg)
 	} else {
-		text = fmt.Sprintf("❌ *Pilot task failed*\n`%s` %s\n\n```\n%s\n```", taskID, escapeMarkdown(title), errorMsg)
+		text = fmt.Sprintf("❌ *Pilot task failed*\n`%s` %s\n\n```\n%s\n```", taskID, escapeMarkdown(title), sanitizeCodeBlock(errorMsg))
 	}
 	_, err := n.client.SendMessage(ctx, n.chatID, text, n.getParseMode())
 	return err

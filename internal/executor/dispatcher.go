@@ -37,7 +37,8 @@ type DispatcherConfig struct {
 // DefaultDispatcherConfig returns default dispatcher settings.
 func DefaultDispatcherConfig() *DispatcherConfig {
 	return &DispatcherConfig{
-		StaleRunningThreshold: 30 * time.Minute,
+		// Epic tasks can run 60-90 minutes across all subtasks; 30m fired too early.
+		StaleRunningThreshold: 2 * time.Hour,
 		StaleQueuedThreshold:  5 * time.Minute,
 		StaleRecoveryInterval: 5 * time.Minute,
 	}

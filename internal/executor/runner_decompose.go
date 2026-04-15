@@ -102,8 +102,15 @@ func (r *Runner) executeDecomposedTask(ctx context.Context, parentTask *Task, su
 		)
 
 		// Execute subtask (recursively calls Execute, but subtasks won't decompose further)
-		// Clear the branch since we already created it
-		subtask.Branch = ""
+		// Clear the branch for all subtasks — the branch is already checked out.
+		// Exception: the final subtask with CreatePR=true needs the branch name so
+		// runner.go's push gate (`task.Branch != ""`) fires and the accumulated work
+		// gets pushed and a PR is created.
+		if subtask.CreatePR && parentTask.Branch != "" {
+			subtask.Branch = parentTask.Branch
+		} else {
+			subtask.Branch = ""
+		}
 
 		// GH-1235: Execute subtasks in the worktree when worktree mode is active
 		subtask.ProjectPath = executionPath

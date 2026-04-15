@@ -186,6 +186,10 @@ func (p *OpenSandboxIsolationProvider) Prepare(ctx context.Context, opts Isolati
 			// Set the origin remote URL to the authenticated URL so push works later.
 			setURLCmd := fmt.Sprintf("cd /workspace && git remote set-url origin %s", shellQuote(remoteURL))
 			_ = runSandboxCommand(ctx, execd, sandboxID, setURLCmd)
+			// Reset any build-time modifications (e.g. flutter pub get changed tracked
+			// files like .flutter-plugins-dependencies). Without this, git checkout -B
+			// fails with "local changes would be overwritten".
+			_ = runSandboxCommand(ctx, execd, sandboxID, "cd /workspace && git reset --hard HEAD && git clean -fd")
 			if opts.Branch != "" {
 				// Always start the new branch from the latest remote main (FETCH_HEAD)
 				// so the PR doesn't conflict with work merged while the image was stale.

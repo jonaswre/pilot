@@ -209,6 +209,21 @@ func (d *Dispatcher) recoverStaleTasks() int {
 			}
 			continue
 		}
+
+		// Skip if a worker is actively processing a task for this project.
+		// The queued task is legitimately waiting its turn — not orphaned.
+		d.mu.RLock()
+		worker, workerExists := d.workers[exec.ProjectPath]
+		d.mu.RUnlock()
+		if workerExists && worker.processing.Load() {
+			d.log.Debug("Skipping stale-queued check: worker is actively processing",
+				slog.String("execution_id", exec.ID),
+				slog.String("task_id", exec.TaskID),
+				slog.String("project", exec.ProjectPath),
+			)
+			continue
+		}
+
 		d.log.Warn("Marking stale queued task as failed",
 			slog.String("execution_id", exec.ID),
 			slog.String("task_id", exec.TaskID),

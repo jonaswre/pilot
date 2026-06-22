@@ -127,12 +127,12 @@ func newStartCmd() *cobra.Command {
 		enablePlane    bool
 		enableDiscord  bool
 		// Mode flags
-		noGateway    bool   // Lightweight mode: polling only, no HTTP gateway
-		sequential   bool   // Sequential execution mode (one issue at a time)
-		envFlag      string // Environment name: dev, stage, prod, or custom configured name
-		enableTunnel bool   // Enable public tunnel (Cloudflare/ngrok)
-		teamID       string // Optional team ID for scoping execution
-		teamMember   string // Member email for project access scoping
+		noGateway      bool   // Lightweight mode: polling only, no HTTP gateway
+		sequential     bool   // Sequential execution mode (one issue at a time)
+		envFlag        string // Environment name: dev, stage, prod, or custom configured name
+		enableTunnel   bool   // Enable public tunnel (Cloudflare/ngrok)
+		teamID         string // Optional team ID for scoping execution
+		teamMember     string // Member email for project access scoping
 		logFormat      string // Log output format: text or json (GH-847)
 		dashboardScope string // Dashboard metrics scope: "project" (default) or "all" (GH-3534)
 	)
@@ -381,6 +381,7 @@ Examples:
 				if runnerErr != nil {
 					return fmt.Errorf("failed to create executor runner: %w", runnerErr)
 				}
+				gwRunner.SetRuntimeConfig(cfg.Runtime)
 				// TASK-286 / GH-3027: refuse sub-issue creation on unmanaged repos.
 				gwRunner.SetRepoAllowlist(newConfigRepoAllowlist(cfg))
 
@@ -1418,6 +1419,7 @@ func runPollingMode(cmd *cobra.Command, cfg *config.Config, projectPath string, 
 	if err != nil {
 		return fmt.Errorf("failed to create executor runner: %w", err)
 	}
+	runner.SetRuntimeConfig(cfg.Runtime)
 	// TASK-286 / GH-3027: refuse sub-issue creation on unmanaged repos.
 	runner.SetRepoAllowlist(newConfigRepoAllowlist(cfg))
 

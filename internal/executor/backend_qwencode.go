@@ -249,6 +249,10 @@ func (b *QwenCodeBackend) buildCommandSpec(opts ExecuteOptions) pilotruntime.Com
 	}
 }
 
+func (b *QwenCodeBackend) BuildCommandSpec(opts ExecuteOptions) pilotruntime.CommandSpec {
+	return b.buildCommandSpec(opts)
+}
+
 // Execute runs a prompt through Qwen Code CLI.
 func (b *QwenCodeBackend) Execute(ctx context.Context, opts ExecuteOptions) (*BackendResult, error) {
 	spec := b.buildCommandSpec(opts)

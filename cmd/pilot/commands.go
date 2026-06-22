@@ -435,6 +435,7 @@ Examples:
 				if runnerErr != nil {
 					return fmt.Errorf("failed to create runner for dry-run: %w", runnerErr)
 				}
+				runner.SetRuntimeConfig(dryRunCfg.Runtime)
 				// TASK-286 / GH-3027: harmless on the dry-run path (no gh calls),
 				// but kept for consistency so the wiring is uniform across sites.
 				runner.SetRepoAllowlist(newConfigRepoAllowlist(dryRunCfg))
@@ -581,6 +582,7 @@ Examples:
 			if runnerErr != nil {
 				return fmt.Errorf("failed to create executor runner: %w", runnerErr)
 			}
+			runner.SetRuntimeConfig(cfg.Runtime)
 			// TASK-286 / GH-3027: refuse sub-issue creation on unmanaged repos.
 			runner.SetRepoAllowlist(newConfigRepoAllowlist(cfg))
 
@@ -1097,6 +1099,7 @@ Examples:
 				if runnerErr != nil {
 					return fmt.Errorf("failed to create runner for dry-run: %w", runnerErr)
 				}
+				runner.SetRuntimeConfig(cfg.Runtime)
 				// TASK-286 / GH-3027: harmless on the dry-run path (no gh calls).
 				runner.SetRepoAllowlist(newConfigRepoAllowlist(cfg))
 				prompt := runner.BuildPrompt(task, task.ProjectPath)
@@ -1118,6 +1121,7 @@ Examples:
 			if runnerErr != nil {
 				return fmt.Errorf("failed to create executor runner: %w", runnerErr)
 			}
+			runner.SetRuntimeConfig(cfg.Runtime)
 			// TASK-286 / GH-3027: refuse sub-issue creation on unmanaged repos.
 			runner.SetRepoAllowlist(newConfigRepoAllowlist(cfg))
 

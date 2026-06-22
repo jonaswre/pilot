@@ -38,6 +38,17 @@ type PreparedExecution struct {
 	cleanup    func(context.Context, bool) error
 }
 
+func NewPreparedExecution(workspacePath, sandboxID string, env *Environment, verify []string, runCommand func(context.Context, CommandSpec) (*CommandResult, error), cleanup func(context.Context, bool) error) *PreparedExecution {
+	return &PreparedExecution{
+		WorkspacePath: workspacePath,
+		SandboxID:     sandboxID,
+		Environment:   env,
+		verify:        append([]string(nil), verify...),
+		runCommand:    runCommand,
+		cleanup:       cleanup,
+	}
+}
+
 func (p *PreparedExecution) RunCommand(ctx context.Context, spec CommandSpec) (*CommandResult, error) {
 	return p.runCommand(ctx, spec)
 }

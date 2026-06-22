@@ -753,6 +753,10 @@ func (b *ClaudeCodeBackend) buildCommandSpec(opts ExecuteOptions, allowFromPR bo
 	}
 }
 
+func (b *ClaudeCodeBackend) BuildCommandSpec(opts ExecuteOptions) pilotruntime.CommandSpec {
+	return b.buildCommandSpec(opts, true)
+}
+
 // truncate returns the first n characters of s, appending "..." if truncated.
 func truncate(s string, n int) string {
 	if len(s) <= n {

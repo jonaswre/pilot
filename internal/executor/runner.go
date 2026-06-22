@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -21,6 +22,7 @@ import (
 	"github.com/qf-studio/pilot/internal/memory"
 	"github.com/qf-studio/pilot/internal/quality"
 	"github.com/qf-studio/pilot/internal/replay"
+	pilotruntime "github.com/qf-studio/pilot/internal/runtime"
 	"github.com/qf-studio/pilot/internal/webhooks"
 )
 
@@ -459,6 +461,10 @@ type PRCreator interface {
 	CreatePR(ctx context.Context, sourceBranch, targetBranch, title, body string) (url string, err error)
 }
 
+type commandSpecBackend interface {
+	BuildCommandSpec(ExecuteOptions) pilotruntime.CommandSpec
+}
+
 // SubIssueLinker links a child issue to a parent issue using GitHub's native sub-issue API (GH-2211).
 // *github.Client satisfies this interface via its LinkSubIssue method.
 type SubIssueLinker interface {
@@ -547,6 +553,16 @@ type Runner struct {
 	// guardrail logs a one-shot WARN and (without PILOT_ALLOW_UNMANAGED_REPO=1)
 	// refuses to create sub-issues — safe default for newly-wired call paths.
 	repoAllowlist RepoAllowlist
+	runtimeConfig *pilotruntime.Config
+	runtime       pilotruntime.ExecutionProvider
+}
+
+func (r *Runner) SetRuntimeConfig(cfg *pilotruntime.Config) {
+	r.runtimeConfig = cfg
+}
+
+func (r *Runner) SetRuntimeProvider(provider pilotruntime.ExecutionProvider) {
+	r.runtime = provider
 }
 
 // SetRepoAllowlist injects the allowlist used by the sub-issue creation
@@ -1376,6 +1392,385 @@ func (r *Runner) finalizeEpicBranchPR(ctx context.Context, task *Task, git *GitO
 	r.reportProgress(task.ID, "Complete", 100, "Epic completed successfully")
 }
 
+func (r *Runner) usesOpenSandboxRuntime() bool {
+	return r.runtimeConfig != nil && r.runtimeConfig.Provider == pilotruntime.ProviderOpenSandbox
+}
+
+func (r *Runner) runtimeProvider() pilotruntime.ExecutionProvider {
+	if r.runtime != nil {
+		return r.runtime
+	}
+	if r.runtimeConfig == nil {
+		return nil
+	}
+	switch r.runtimeConfig.Provider {
+	case pilotruntime.ProviderOpenSandbox:
+		return pilotruntime.NewOpenSandboxProvider(r.runtimeConfig, nil)
+	default:
+		return nil
+	}
+}
+
+func (r *Runner) executeWithRuntime(ctx context.Context, task *Task, start time.Time) (*ExecutionResult, error) {
+	builder, ok := r.backend.(commandSpecBackend)
+	if !ok {
+		return &ExecutionResult{
+			TaskID:   task.ID,
+			Success:  false,
+			Error:    fmt.Sprintf("runtime_unavailable: backend %q does not support remote command execution", r.backend.Name()),
+			Duration: time.Since(start),
+			Outcome:  "infra",
+		}, nil
+	}
+	provider := r.runtimeProvider()
+	if provider == nil {
+		return nil, fmt.Errorf("runtime provider is not configured")
+	}
+
+	repoURL, err := NewGitOperations(task.ProjectPath).GetRemoteURL(ctx)
+	if err != nil {
+		return &ExecutionResult{
+			TaskID:   task.ID,
+			Success:  false,
+			Error:    fmt.Sprintf("runtime_workspace_setup_failed: %v", err),
+			Duration: time.Since(start),
+			Outcome:  "infra",
+		}, nil
+	}
+
+	r.reportProgress(task.ID, "Runtime", 1, "Preparing OpenSandbox runtime...")
+	prepared, err := provider.Prepare(ctx, pilotruntime.ExecutionRequest{
+		TaskID:      task.ID,
+		ProjectPath: task.ProjectPath,
+		RepoURL:     repoURL,
+		Branch:      task.Branch,
+		BaseBranch:  task.BaseBranch,
+		ProjectName: filepath.Base(task.ProjectPath),
+		SourceRepo:  task.SourceRepo,
+	})
+	if err != nil {
+		return &ExecutionResult{
+			TaskID:   task.ID,
+			Success:  false,
+			Error:    err.Error(),
+			Duration: time.Since(start),
+			Outcome:  "infra",
+		}, nil
+	}
+	cleanupSuccess := false
+	defer func() {
+		if cleanupErr := prepared.Cleanup(context.Background(), cleanupSuccess); cleanupErr != nil {
+			r.log.Warn("Runtime cleanup failed",
+				slog.String("task_id", task.ID),
+				slog.String("sandbox_id", prepared.SandboxID),
+				slog.Any("error", cleanupErr),
+			)
+		}
+	}()
+
+	complexity := DetectComplexity(task)
+	timeout := r.modelRouter.SelectTimeout(task)
+	runCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	selectedModel := r.resolveSelectedModel(task)
+	selectedEffort := r.modelRouter.SelectEffort(task)
+	allowedTools, mcpConfigPath := r.executionToolOptions()
+	prompt := r.BuildPrompt(task, task.ProjectPath)
+	state := &progressState{phase: "Starting", budgetCancel: cancel}
+
+	r.reportProgress(task.ID, "Runtime", 5, "Sandbox ready")
+	r.reportProgress(task.ID, "Starting", 8, fmt.Sprintf("Initializing %s in sandbox...", r.backend.Name()))
+
+	backendResult, err := r.runRuntimeBackend(runCtx, prepared, builder, ExecuteOptions{
+		Prompt:        prompt,
+		ProjectPath:   prepared.WorkspacePath,
+		Verbose:       task.Verbose,
+		Model:         selectedModel,
+		Effort:        selectedEffort,
+		AllowedTools:  allowedTools,
+		MCPConfigPath: mcpConfigPath,
+		EventHandler: func(event BackendEvent) {
+			r.processBackendEvent(task.ID, event, state)
+		},
+	})
+	duration := time.Since(start)
+	result := &ExecutionResult{
+		TaskID:                   task.ID,
+		Duration:                 duration,
+		EffortLevel:              selectedEffort,
+		ComplexityLevel:          complexity.String(),
+		TokensInput:              backendResult.TokensInput,
+		TokensOutput:             backendResult.TokensOutput,
+		TokensTotal:              backendResult.TokensInput + backendResult.TokensOutput,
+		CacheCreationInputTokens: backendResult.CacheCreationInputTokens,
+		CacheReadInputTokens:     backendResult.CacheReadInputTokens,
+		ModelName:                backendResult.Model,
+		Output:                   backendResult.Output,
+		Error:                    backendResult.Error,
+		PeakRSSMB:                backendResult.PeakRSSMB,
+		FinalRSSMB:               backendResult.FinalRSSMB,
+	}
+	if result.ModelName == "" {
+		result.ModelName = r.fallbackModelName()
+	}
+	result.EstimatedCostUSD = estimateCostWithCache(result.TokensInput, result.TokensOutput, result.CacheCreationInputTokens, result.CacheReadInputTokens, result.ModelName)
+	if err != nil || !backendResult.Success {
+		result.Success = false
+		if result.Error == "" && err != nil {
+			result.Error = err.Error()
+		}
+		if result.Error == "" {
+			result.Error = "runtime backend execution failed"
+		}
+		r.reportProgress(task.ID, "Failed", 100, result.Error)
+		r.recordRuntimeOutcome(task, result, complexity, duration)
+		return result, nil
+	}
+
+	result.Success = true
+	r.reportProgress(task.ID, "Verifying", 90, "Running sandbox verification...")
+	if err := prepared.RunVerify(runCtx); err != nil {
+		result.Success = false
+		result.Error = err.Error()
+		r.reportProgress(task.ID, "Verify Failed", 100, result.Error)
+		r.recordRuntimeOutcome(task, result, complexity, duration)
+		return result, nil
+	}
+
+	baseBranch := task.BaseBranch
+	if baseBranch == "" {
+		baseBranch = "main"
+	}
+	commitCount, err := r.runtimeCommitCount(runCtx, prepared, baseBranch)
+	if err != nil {
+		result.Success = false
+		result.Error = fmt.Sprintf("runtime git commit check failed: %v", err)
+		r.reportProgress(task.ID, "Failed", 100, result.Error)
+		r.recordRuntimeOutcome(task, result, complexity, duration)
+		return result, nil
+	}
+	if task.CreatePR && task.Branch != "" && commitCount == 0 {
+		result.Success = false
+		result.Outcome = "no_op"
+		result.Error = "no_changes: branch has no commits relative to base (runtime PR guard)"
+		r.reportProgress(task.ID, "PR Failed", 100, result.Error)
+		r.recordRuntimeOutcome(task, result, complexity, duration)
+		return result, nil
+	}
+	if sha, shaErr := r.runtimeCommandOutput(runCtx, prepared, "git rev-parse HEAD"); shaErr == nil {
+		result.CommitSHA = strings.TrimSpace(sha)
+	}
+	if stats, statsErr := r.runtimeDiffStats(runCtx, prepared, baseBranch); statsErr == nil {
+		result.FilesChanged = len(stats.Files)
+		result.LinesAdded = stats.Added
+		result.LinesRemoved = stats.Removed
+	}
+
+	if task.CreatePR && task.Branch != "" {
+		r.reportProgress(task.ID, "Creating PR", 96, "Pushing sandbox branch...")
+		if _, err := r.runtimeRequiredCommand(runCtx, prepared, fmt.Sprintf("git push -u origin %s", remoteShellQuote(task.Branch))); err != nil {
+			result.Success = false
+			result.Error = fmt.Sprintf("push failed: %v", err)
+			r.reportProgress(task.ID, "PR Failed", 100, result.Error)
+			r.recordRuntimeOutcome(task, result, complexity, duration)
+			return result, nil
+		}
+
+		diffStats, _ := r.runtimeDiffStats(runCtx, prepared, baseBranch)
+		normalizedTitle, titleErr := normalizeTitle(task.Title, task.Labels, diffStats)
+		if titleErr != nil {
+			result.Success = false
+			result.Error = fmt.Sprintf("PR creation refused: %v", titleErr)
+			r.reportProgress(task.ID, "PR Failed", 100, result.Error)
+			r.recordRuntimeOutcome(task, result, complexity, duration)
+			return result, nil
+		}
+		prTitle := fmt.Sprintf("%s: %s", task.ID, normalizedTitle)
+		var prURL string
+		if r.prCreator != nil && task.SourceAdapter != "" && task.SourceAdapter != "github" {
+			closeKeyword := ""
+			if task.SourceIssueID != "" {
+				closeKeyword = fmt.Sprintf("\n\nCloses #%s", task.SourceIssueID)
+			}
+			prBody := fmt.Sprintf("## Summary\n\nAutomated MR created by Pilot for task %s.%s\n\n## Changes\n\n%s", task.ID, closeKeyword, task.Description)
+			prURL, err = r.prCreator.CreatePR(runCtx, task.Branch, baseBranch, prTitle, prBody)
+		} else {
+			issueNum := strings.TrimPrefix(task.ID, "GH-")
+			prBody := fmt.Sprintf("## Summary\n\nAutomated PR created by Pilot for task %s.\n\nCloses #%s\n\n## Changes\n\n%s", task.ID, issueNum, task.Description)
+			prURL, err = NewGitOperations(task.ProjectPath).CreatePRWithHead(runCtx, task.Branch, prTitle, prBody, baseBranch)
+		}
+		if err != nil {
+			result.Success = false
+			result.Error = fmt.Sprintf("PR creation failed: %v", err)
+			r.reportProgress(task.ID, "PR Failed", 100, result.Error)
+			r.recordRuntimeOutcome(task, result, complexity, duration)
+			return result, nil
+		}
+		result.PRUrl = prURL
+		r.reportProgress(task.ID, "Completed", 100, fmt.Sprintf("PR created: %s", prURL))
+	} else {
+		r.reportProgress(task.ID, "Completed", 100, "Task completed successfully")
+	}
+
+	cleanupSuccess = result.Success
+	r.recordRuntimeOutcome(task, result, complexity, duration)
+	return result, nil
+}
+
+func (r *Runner) runRuntimeBackend(ctx context.Context, prepared *pilotruntime.PreparedExecution, builder commandSpecBackend, opts ExecuteOptions) (*BackendResult, error) {
+	spec := builder.BuildCommandSpec(opts)
+	if spec.CWD == "" {
+		spec.CWD = prepared.WorkspacePath
+	}
+	commandResult, err := prepared.RunCommand(ctx, spec)
+	if commandResult == nil {
+		commandResult = &pilotruntime.CommandResult{ExitCode: 1, Success: false}
+	}
+	result := &BackendResult{Success: commandResult.Success, Stderr: commandResult.Stderr}
+	scanner := bufio.NewScanner(strings.NewReader(commandResult.Stdout))
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, 1024*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+		event := r.parseRuntimeBackendEvent(line)
+		if opts.EventHandler != nil {
+			opts.EventHandler(event)
+		}
+		if event.Type == EventTypeText && event.Message != "" {
+			result.LastAssistantText = event.Message
+		}
+		if event.Type == EventTypeResult {
+			if event.IsError {
+				result.Error = event.Message
+			} else {
+				result.Output = event.Message
+				result.SawSuccessResult = true
+			}
+		}
+		if event.Type == EventTypeInit && event.SessionID != "" {
+			result.SessionID = event.SessionID
+		}
+		result.TokensInput += event.TokensInput
+		result.TokensOutput += event.TokensOutput
+		result.CacheCreationInputTokens += event.CacheCreationInputTokens
+		result.CacheReadInputTokens += event.CacheReadInputTokens
+		if event.Model != "" {
+			result.Model = event.Model
+		}
+	}
+	if scanErr := scanner.Err(); scanErr != nil {
+		return result, scanErr
+	}
+	if result.Output == "" && commandResult.Success {
+		result.Output = strings.TrimSpace(commandResult.Stdout)
+	}
+	if err != nil {
+		result.Success = false
+		result.Error = err.Error()
+		return result, err
+	}
+	if !commandResult.Success {
+		result.Success = false
+		if result.Error == "" {
+			result.Error = strings.TrimSpace(commandResult.Stderr)
+		}
+		if result.Error == "" {
+			result.Error = fmt.Sprintf("remote command exited %d", commandResult.ExitCode)
+		}
+		return result, fmt.Errorf("%s", result.Error)
+	}
+	if result.Error != "" {
+		result.Success = false
+	}
+	return result, nil
+}
+
+func (r *Runner) parseRuntimeBackendEvent(line string) BackendEvent {
+	switch backend := r.backend.(type) {
+	case *ClaudeCodeBackend:
+		return backend.parseStreamEvent(line)
+	case *QwenCodeBackend:
+		return backend.parseStreamEvent(line)
+	default:
+		return BackendEvent{Type: EventTypeText, Raw: line, Message: line}
+	}
+}
+
+func (r *Runner) runtimeCommitCount(ctx context.Context, prepared *pilotruntime.PreparedExecution, baseBranch string) (int, error) {
+	out, err := r.runtimeCommandOutput(ctx, prepared, fmt.Sprintf("git rev-list --count origin/%s..HEAD", remoteShellQuote(baseBranch)))
+	if err != nil {
+		return 0, err
+	}
+	count, parseErr := strconv.Atoi(strings.TrimSpace(out))
+	if parseErr != nil {
+		return 0, fmt.Errorf("parse commit count %q: %w", strings.TrimSpace(out), parseErr)
+	}
+	return count, nil
+}
+
+func (r *Runner) runtimeDiffStats(ctx context.Context, prepared *pilotruntime.PreparedExecution, baseBranch string) (GitDiff, error) {
+	out, err := r.runtimeCommandOutput(ctx, prepared, fmt.Sprintf("git diff --numstat origin/%s...HEAD", remoteShellQuote(baseBranch)))
+	if err != nil {
+		return GitDiff{}, err
+	}
+	var diff GitDiff
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if line == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 3 {
+			continue
+		}
+		added, addErr := strconv.Atoi(fields[0])
+		removed, removeErr := strconv.Atoi(fields[1])
+		if addErr != nil || removeErr != nil {
+			continue
+		}
+		diff.Files = append(diff.Files, fields[2])
+		diff.Added += added
+		diff.Removed += removed
+	}
+	return diff, nil
+}
+
+func (r *Runner) runtimeCommandOutput(ctx context.Context, prepared *pilotruntime.PreparedExecution, command string) (string, error) {
+	result, err := r.runtimeRequiredCommand(ctx, prepared, command)
+	if err != nil {
+		return "", err
+	}
+	return result.Stdout, nil
+}
+
+func (r *Runner) runtimeRequiredCommand(ctx context.Context, prepared *pilotruntime.PreparedExecution, command string) (*pilotruntime.CommandResult, error) {
+	result, err := prepared.RunCommand(ctx, pilotruntime.CommandSpec{Command: command, CWD: prepared.WorkspacePath})
+	if err != nil {
+		return result, err
+	}
+	if result != nil && !result.Success {
+		return result, fmt.Errorf("command %q exited %d: %s", command, result.ExitCode, strings.TrimSpace(result.Stderr))
+	}
+	return result, nil
+}
+
+func (r *Runner) recordRuntimeOutcome(task *Task, result *ExecutionResult, complexity Complexity, duration time.Duration) {
+	if r.metricsRecorder != nil {
+		outcomeLabel := "success"
+		if !result.Success {
+			outcomeLabel = "failed"
+		}
+		r.metricsRecorder.RecordExecution(result.ModelName, outcomeLabel)
+	}
+	r.recordLearning(context.Background(), task, result)
+	r.recordGraphLearning(task, result)
+	r.recordOutcome(task, result, complexity, duration)
+}
+
+func remoteShellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
+}
+
 // executeWithOptions is the internal implementation that allows controlling worktree creation.
 // When allowWorktree is false, it skips worktree creation even if configured.
 // This prevents recursive worktree creation in sub-issues and decomposed tasks.
@@ -1433,6 +1828,10 @@ func (r *Runner) executeWithOptions(ctx context.Context, task *Task, allowWorktr
 		} else {
 			task.BaseBranch = "main"
 		}
+	}
+
+	if r.usesOpenSandboxRuntime() {
+		return r.executeWithRuntime(ctx, task, start)
 	}
 
 	// GH-936: Create isolated worktree if configured

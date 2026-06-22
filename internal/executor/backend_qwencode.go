@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/qf-studio/pilot/internal/logging"
+	pilotruntime "github.com/qf-studio/pilot/internal/runtime"
 )
 
 // qwenToolNameMap normalizes Qwen Code tool names (snake_case) to the PascalCase
@@ -237,16 +238,32 @@ func (b *QwenCodeBackend) buildArgs(opts ExecuteOptions) []string {
 	return args
 }
 
+func (b *QwenCodeBackend) buildCommandSpec(opts ExecuteOptions) pilotruntime.CommandSpec {
+	return pilotruntime.CommandSpec{
+		Command: b.config.Command,
+		Args:    b.buildArgs(opts),
+		CWD:     opts.ProjectPath,
+		Env: map[string]string{
+			"PILOT_EXECUTOR": "1",
+		},
+	}
+}
+
+func (b *QwenCodeBackend) BuildCommandSpec(opts ExecuteOptions) pilotruntime.CommandSpec {
+	return b.buildCommandSpec(opts)
+}
+
 // Execute runs a prompt through Qwen Code CLI.
 func (b *QwenCodeBackend) Execute(ctx context.Context, opts ExecuteOptions) (*BackendResult, error) {
-	args := b.buildArgs(opts)
+	spec := b.buildCommandSpec(opts)
 
-	cmd := exec.CommandContext(ctx, b.config.Command, args...)
-	cmd.Dir = opts.ProjectPath
+	cmd := exec.CommandContext(ctx, spec.Command, spec.Args...)
+	cmd.Dir = spec.CWD
+	cmd.Env = environmentWithOverrides(spec.Env)
 
 	b.log.Debug("Starting Qwen Code",
-		slog.String("command", b.config.Command),
-		slog.String("project", opts.ProjectPath),
+		slog.String("command", spec.Command),
+		slog.String("project", spec.CWD),
 	)
 
 	// Create pipes for output

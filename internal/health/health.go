@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/qf-studio/pilot/internal/config"
+	pilotruntime "github.com/qf-studio/pilot/internal/runtime"
 )
 
 // Status represents feature or dependency status
@@ -470,6 +471,35 @@ func checkIssueSourceAdapter(cfg *config.Config) ConfigCheck {
 	}
 }
 
+func checkRuntimeConfig(cfg *config.Config) ConfigCheck {
+	runtimeCfg := cfg.Runtime
+	if runtimeCfg == nil {
+		runtimeCfg = pilotruntime.DefaultConfig()
+	}
+	if err := runtimeCfg.Validate(); err != nil {
+		return ConfigCheck{
+			Name:    "runtime",
+			Status:  StatusError,
+			Message: err.Error(),
+			Fix:     "Set runtime.provider to host or configure runtime.opensandbox.endpoint.",
+		}
+	}
+	switch runtimeCfg.Provider {
+	case pilotruntime.ProviderOpenSandbox:
+		return ConfigCheck{
+			Name:    "runtime",
+			Status:  StatusOK,
+			Message: "opensandbox (" + runtimeCfg.OpenSandbox.Endpoint + ")",
+		}
+	default:
+		return ConfigCheck{
+			Name:    "runtime",
+			Status:  StatusOK,
+			Message: "host",
+		}
+	}
+}
+
 // checkConfig validates configuration
 func checkConfig(cfg *config.Config) []ConfigCheck {
 	checks := []ConfigCheck{}
@@ -490,6 +520,8 @@ func checkConfig(cfg *config.Config) []ConfigCheck {
 			Message: configPath,
 		})
 	}
+
+	checks = append(checks, checkRuntimeConfig(cfg))
 
 	// Check Telegram config
 	if cfg.Adapters != nil && cfg.Adapters.Telegram != nil {

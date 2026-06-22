@@ -1,0 +1,41 @@
+# Repo-owned Pilot execution environment contract.
+# Copy to .pilot/environment.yaml in a repository that should run in OpenSandbox.
+
+version: 1
+
+# Passed through to OpenSandbox CreateSandboxRequest. Use OpenSandbox-native
+# fields here instead of a Pilot-specific runtime schema.
+sandbox:
+  image:
+    uri: "ghcr.io/acme/project-agent:latest"
+  entrypoint:
+    - "tail"
+    - "-f"
+    - "/dev/null"
+  resources:
+    cpu: "4"
+    memory: "8Gi"
+  metadata:
+    project: "acme/project"
+
+# Pilot-owned lifecycle fields around the sandbox request.
+pilot:
+  workspace:
+    path: "/workspace/project"
+
+  checkout:
+    strategy: "clone"
+    depth: 1
+
+  setup:
+    - "corepack enable"
+    - "pnpm install --frozen-lockfile"
+
+  verify:
+    - "pnpm test"
+
+  secrets:
+    required:
+      - "GITHUB_TOKEN"
+    optional:
+      - "NPM_TOKEN"

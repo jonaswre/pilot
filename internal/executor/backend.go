@@ -2,6 +2,8 @@ package executor
 
 import (
 	"context"
+	"os"
+	"sort"
 	"time"
 )
 
@@ -375,6 +377,23 @@ type BackendConfig struct {
 	// Version is the Pilot binary version, set at startup from the build-time version var.
 	// Used for feature matrix updates and execution reports. Not a config file field.
 	Version string `yaml:"-"`
+}
+
+func environmentWithOverrides(overrides map[string]string) []string {
+	env := os.Environ()
+	if len(overrides) == 0 {
+		return env
+	}
+
+	keys := make([]string, 0, len(overrides))
+	for key := range overrides {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		env = append(env, key+"="+overrides[key])
+	}
+	return env
 }
 
 // EffectiveStallTimeout returns the stall detection threshold, applying the

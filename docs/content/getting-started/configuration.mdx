@@ -186,6 +186,66 @@ Always set `allowed_ids` to restrict who can trigger Pilot via Telegram. Without
 
 ---
 
+## Runtime
+
+Pilot's runtime config is global for the Pilot installation. Use `host` to keep the existing local execution behavior, or `opensandbox` to run each task in a short-lived sandbox.
+
+```yaml
+runtime:
+  provider: "host"                       # "host" or "opensandbox"
+
+  # provider: "opensandbox"
+  # opensandbox:
+  #   endpoint: "http://opensandbox.local:8080"
+  #   api_key: "${OPEN_SANDBOX_API_KEY}"
+  #   cleanup:
+  #     always_delete: true
+  #     retain_on_failure: false
+  #   secrets:
+  #     GITHUB_TOKEN:
+  #       from_env: "GITHUB_TOKEN"
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `provider` | string | `"host"` | Runtime provider for all tasks: `host` or `opensandbox` |
+| `opensandbox.endpoint` | string | — | OpenSandbox lifecycle API endpoint |
+| `opensandbox.api_key` | string | — | API key sent as `OPEN-SANDBOX-API-KEY` |
+| `opensandbox.cleanup.always_delete` | bool | `true` | Delete sandboxes after task completion |
+| `opensandbox.cleanup.retain_on_failure` | bool | `false` | Keep failed sandboxes for debugging |
+| `opensandbox.secrets` | map | `{}` | Operator-owned mapping from repo-declared secret names to environment variables |
+
+Repos that run in OpenSandbox declare their execution requirements in `.pilot/environment.yaml`. The `sandbox` block is passed through to OpenSandbox; the `pilot` block describes workspace checkout, setup, verification, and required secrets.
+
+```yaml
+version: 1
+
+sandbox:
+  image:
+    uri: "ghcr.io/acme/project-agent:latest"
+  entrypoint: ["tail", "-f", "/dev/null"]
+
+pilot:
+  workspace:
+    path: "/workspace/project"
+  checkout:
+    strategy: "clone"
+    depth: 1
+  setup:
+    - "pnpm install --frozen-lockfile"
+  verify:
+    - "pnpm test"
+  secrets:
+    required:
+      - "GITHUB_TOKEN"
+```
+
+<Callout type="info">
+`runtime.provider` is not repo-authored. If an installation is configured for OpenSandbox, every eligible task uses OpenSandbox; the repo only describes the sandbox it needs.
+</Callout>
+
+---
+
 ## Executor
 
 Controls how Pilot runs execution backends (Claude Code, Qwen Code, or OpenCode) to execute tasks.

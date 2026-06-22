@@ -199,6 +199,23 @@ func (g *GitOperations) CreatePR(ctx context.Context, title, body, baseBranch st
 		args = append(args, "--head", headBranch)
 	}
 
+	return g.createPRWithArgs(ctx, args)
+}
+
+func (g *GitOperations) CreatePRWithHead(ctx context.Context, headBranch, title, body, baseBranch string) (string, error) {
+	if err := validatePRTitle(title); err != nil {
+		return "", err
+	}
+	args := []string{"pr", "create",
+		"--title", title,
+		"--body", body,
+		"--base", baseBranch,
+		"--head", headBranch,
+	}
+	return g.createPRWithArgs(ctx, args)
+}
+
+func (g *GitOperations) createPRWithArgs(ctx context.Context, args []string) (string, error) {
 	cmd := exec.CommandContext(ctx, "gh", args...)
 	cmd.Dir = g.projectPath
 	output, err := cmd.CombinedOutput()
@@ -282,6 +299,16 @@ func (g *GitOperations) GetCurrentBranch(ctx context.Context) (string, error) {
 	output, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("failed to get current branch: %w", err)
+	}
+	return strings.TrimSpace(string(output)), nil
+}
+
+func (g *GitOperations) GetRemoteURL(ctx context.Context) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", "remote", "get-url", "origin")
+	cmd.Dir = g.projectPath
+	output, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("failed to get origin remote URL: %w", err)
 	}
 	return strings.TrimSpace(string(output)), nil
 }

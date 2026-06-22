@@ -56,6 +56,7 @@ func NewPollingHarness(t *testing.T, cfg *config.Config) *Harness {
 	if err != nil {
 		t.Fatalf("NewRunnerWithConfig: %v", err)
 	}
+	runner.SetRuntimeConfig(cfg.Runtime)
 	h.Runner = runner
 
 	// Quality checker factory
@@ -171,6 +172,7 @@ func NewGatewayHarness(t *testing.T, cfg *config.Config) *Harness {
 	if err != nil {
 		t.Fatalf("NewRunnerWithConfig: %v", err)
 	}
+	runner.SetRuntimeConfig(cfg.Runtime)
 	h.Runner = runner
 
 	// Quality checker factory

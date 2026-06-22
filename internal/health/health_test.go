@@ -15,6 +15,7 @@ import (
 	"github.com/qf-studio/pilot/internal/approval"
 	"github.com/qf-studio/pilot/internal/autopilot"
 	"github.com/qf-studio/pilot/internal/config"
+	pilotruntime "github.com/qf-studio/pilot/internal/runtime"
 	"github.com/qf-studio/pilot/internal/transcription"
 )
 
@@ -254,6 +255,53 @@ func TestCheckConfig_ValidProjects(t *testing.T) {
 	}
 	if found.Status != StatusOK {
 		t.Errorf("projects status = %v, want StatusOK", found.Status)
+	}
+}
+
+func TestCheckConfig_RuntimeHost(t *testing.T) {
+	cfg := &config.Config{Runtime: pilotruntime.DefaultConfig()}
+	checks := checkConfig(cfg)
+	found := findConfigCheck(checks, "runtime")
+	if found == nil {
+		t.Fatal("runtime check missing")
+	}
+	if found.Status != StatusOK {
+		t.Fatalf("runtime status = %v, want OK: %#v", found.Status, found)
+	}
+	if !strings.Contains(found.Message, "host") {
+		t.Fatalf("runtime message = %q, want host", found.Message)
+	}
+}
+
+func TestCheckConfig_RuntimeOpenSandbox(t *testing.T) {
+	cfg := &config.Config{Runtime: &pilotruntime.Config{
+		Provider: pilotruntime.ProviderOpenSandbox,
+		OpenSandbox: pilotruntime.OpenSandboxConfig{
+			Endpoint: "http://opensandbox.local:8080",
+		},
+	}}
+	checks := checkConfig(cfg)
+	found := findConfigCheck(checks, "runtime")
+	if found == nil {
+		t.Fatal("runtime check missing")
+	}
+	if found.Status != StatusOK {
+		t.Fatalf("runtime status = %v, want OK: %#v", found.Status, found)
+	}
+	if !strings.Contains(found.Message, "opensandbox") {
+		t.Fatalf("runtime message = %q, want opensandbox", found.Message)
+	}
+}
+
+func TestCheckConfig_RuntimeOpenSandboxMissingEndpoint(t *testing.T) {
+	cfg := &config.Config{Runtime: &pilotruntime.Config{Provider: pilotruntime.ProviderOpenSandbox}}
+	checks := checkConfig(cfg)
+	found := findConfigCheck(checks, "runtime")
+	if found == nil {
+		t.Fatal("runtime check missing")
+	}
+	if found.Status != StatusError {
+		t.Fatalf("runtime status = %v, want error: %#v", found.Status, found)
 	}
 }
 

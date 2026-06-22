@@ -28,6 +28,7 @@ import (
 	"github.com/qf-studio/pilot/internal/gateway"
 	"github.com/qf-studio/pilot/internal/logging"
 	"github.com/qf-studio/pilot/internal/quality"
+	pilotruntime "github.com/qf-studio/pilot/internal/runtime"
 	"github.com/qf-studio/pilot/internal/tunnel"
 	"github.com/qf-studio/pilot/internal/webhooks"
 )
@@ -51,6 +52,7 @@ type Config struct {
 	Logging        *logging.Config         `yaml:"logging"`
 	Approval       *approval.Config        `yaml:"approval"`
 	Quality        *quality.Config         `yaml:"quality"`
+	Runtime        *pilotruntime.Config    `yaml:"runtime"`
 	Tunnel         *tunnel.Config          `yaml:"tunnel"`
 	Webhooks       *webhooks.Config        `yaml:"webhooks"`
 	TeamID         string                  `yaml:"team_id"` // Optional team ID for scoping execution
@@ -370,6 +372,7 @@ func DefaultConfig() *Config {
 		Logging:  logging.DefaultConfig(),
 		Approval: approval.DefaultConfig(),
 		Quality:  quality.DefaultConfig(),
+		Runtime:  pilotruntime.DefaultConfig(),
 		Tunnel:   tunnel.DefaultConfig(),
 		Webhooks: webhooks.DefaultConfig(),
 	}
@@ -623,6 +626,11 @@ func (c *Config) Validate() error {
 	// Validate budget daily_limit > 0 when budget is enabled
 	if c.Budget != nil && c.Budget.Enabled && c.Budget.DailyLimit <= 0 {
 		return fmt.Errorf("budget.daily_limit must be > 0 when budget is enabled, got %g", c.Budget.DailyLimit)
+	}
+	if c.Runtime != nil {
+		if err := c.Runtime.Validate(); err != nil {
+			return err
+		}
 	}
 
 	return nil

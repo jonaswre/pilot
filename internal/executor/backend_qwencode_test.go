@@ -519,3 +519,33 @@ func TestBackendFactoryQwenCodeNilConfig(t *testing.T) {
 		t.Errorf("Name() = %q, want %q", backend.Name(), BackendTypeQwenCode)
 	}
 }
+
+func TestQwenCodeBackendCommandSpec(t *testing.T) {
+	backend := NewQwenCodeBackend(&QwenCodeConfig{
+		Command:          "qwen-custom",
+		ExtraArgs:        []string{"--extra"},
+		UseSessionResume: true,
+	})
+
+	spec := backend.buildCommandSpec(ExecuteOptions{
+		Prompt:          "implement the task",
+		ProjectPath:     "/workspace",
+		Model:           "qwen-test",
+		ResumeSessionID: "session-123",
+	})
+
+	if spec.Command != "qwen-custom" {
+		t.Fatalf("Command = %q, want qwen-custom", spec.Command)
+	}
+	if spec.CWD != "/workspace" {
+		t.Fatalf("CWD = %q, want /workspace", spec.CWD)
+	}
+	for _, want := range []string{"--resume", "session-123", "-p", "implement the task", "--output-format", "stream-json", "--yolo", "--model", "qwen-test", "--extra"} {
+		if !stringSliceContains(spec.Args, want) {
+			t.Fatalf("Args missing %q: %#v", want, spec.Args)
+		}
+	}
+	if spec.Env["PILOT_EXECUTOR"] != "1" {
+		t.Fatalf("PILOT_EXECUTOR = %q", spec.Env["PILOT_EXECUTOR"])
+	}
+}

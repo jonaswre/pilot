@@ -1071,3 +1071,58 @@ exit 2
 		t.Errorf("second invocation should not contain --resume: %q", lines[1])
 	}
 }
+
+func TestClaudeCodeBackendCommandSpec(t *testing.T) {
+	backend := NewClaudeCodeBackend(&ClaudeCodeConfig{
+		Command:     "claude-custom",
+		ExtraArgs:   []string{"--extra"},
+		MaxOutputTokens: 1234,
+	})
+	backend.SetProviderEnv("https://anthropic.example", "auth-token", "claude-test")
+
+	spec := backend.buildCommandSpec(ExecuteOptions{
+		Prompt:       "implement the task",
+		ProjectPath:  "/workspace",
+		Model:        "claude-sonnet-test",
+		Effort:       "high",
+		MaxTurns:     12,
+		AllowedTools: []string{"Read", "Write"},
+		MCPConfigPath: "/tmp/mcp.json",
+	}, true)
+
+	if spec.Command != "claude-custom" {
+		t.Fatalf("Command = %q, want claude-custom", spec.Command)
+	}
+	if spec.CWD != "/workspace" {
+		t.Fatalf("CWD = %q, want /workspace", spec.CWD)
+	}
+	for _, want := range []string{"-p", "implement the task", "--verbose", "--output-format", "stream-json", "--dangerously-skip-permissions", "--model", "claude-sonnet-test", "--max-turns", "12", "--effort", "high", "--allowedTools", "Read,Write", "--mcp-config", "/tmp/mcp.json", "--extra"} {
+		if !stringSliceContains(spec.Args, want) {
+			t.Fatalf("Args missing %q: %#v", want, spec.Args)
+		}
+	}
+	if spec.Env["PILOT_EXECUTOR"] != "1" {
+		t.Fatalf("PILOT_EXECUTOR = %q", spec.Env["PILOT_EXECUTOR"])
+	}
+	if spec.Env["ANTHROPIC_BASE_URL"] != "https://anthropic.example" {
+		t.Fatalf("ANTHROPIC_BASE_URL = %q", spec.Env["ANTHROPIC_BASE_URL"])
+	}
+	if spec.Env["ANTHROPIC_AUTH_TOKEN"] != "auth-token" {
+		t.Fatalf("ANTHROPIC_AUTH_TOKEN = %q", spec.Env["ANTHROPIC_AUTH_TOKEN"])
+	}
+	if spec.Env["ANTHROPIC_MODEL"] != "claude-test" {
+		t.Fatalf("ANTHROPIC_MODEL = %q", spec.Env["ANTHROPIC_MODEL"])
+	}
+	if spec.Env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] != "1234" {
+		t.Fatalf("CLAUDE_CODE_MAX_OUTPUT_TOKENS = %q", spec.Env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"])
+	}
+}
+
+func stringSliceContains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}

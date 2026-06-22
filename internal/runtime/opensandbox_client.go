@@ -42,9 +42,21 @@ type SandboxEndpoint struct {
 
 type CommandSpec struct {
 	Command string
+	Args    []string
 	CWD     string
 	Timeout time.Duration
 	Env     map[string]string
+}
+
+func (s CommandSpec) ShellCommand() string {
+	if len(s.Args) == 0 {
+		return s.Command
+	}
+	parts := []string{shellQuote(s.Command)}
+	for _, arg := range s.Args {
+		parts = append(parts, shellQuote(arg))
+	}
+	return strings.Join(parts, " ")
 }
 
 type CommandEvent struct {
@@ -143,7 +155,7 @@ func (c *OpenSandboxClient) GetEndpoint(ctx context.Context, sandboxID string, p
 
 func (c *OpenSandboxClient) RunCommand(ctx context.Context, execdEndpoint string, headers map[string]string, spec CommandSpec) (*CommandResult, error) {
 	body := map[string]any{
-		"command":    spec.Command,
+		"command":    spec.ShellCommand(),
 		"cwd":        spec.CWD,
 		"background": false,
 	}

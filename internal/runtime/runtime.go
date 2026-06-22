@@ -76,7 +76,12 @@ func (p *HostProvider) Prepare(ctx context.Context, req ExecutionRequest) (*Prep
 	return &PreparedExecution{
 		WorkspacePath: req.ProjectPath,
 		runCommand: func(ctx context.Context, spec CommandSpec) (*CommandResult, error) {
-			cmd := exec.CommandContext(ctx, "bash", "-lc", spec.Command)
+			var cmd *exec.Cmd
+			if len(spec.Args) > 0 {
+				cmd = exec.CommandContext(ctx, spec.Command, spec.Args...)
+			} else {
+				cmd = exec.CommandContext(ctx, "bash", "-lc", spec.Command)
+			}
 			if spec.CWD != "" {
 				cmd.Dir = spec.CWD
 			}

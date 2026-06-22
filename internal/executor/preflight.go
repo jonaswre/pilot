@@ -41,7 +41,7 @@ type PreflightOptions struct {
 	// is enabled, as the worktree is always clean (created from a commit).
 	SkipGitClean bool
 
-	// BackendType specifies the configured backend ("claude-code", "opencode", "qwen-code").
+	// BackendType specifies the configured backend ("claude-code", "codex-cli", "opencode", "qwen-code").
 	// When set, the CLI availability check matches the active backend instead of
 	// always requiring 'claude'.
 	BackendType string
@@ -151,6 +151,7 @@ var backendCLICommands = map[string]struct {
 	versionFlag string
 }{
 	"claude-code": {command: "claude", versionFlag: "--version"},
+	"codex-cli":   {command: "codex", versionFlag: "--version"},
 	"opencode":    {command: "opencode", versionFlag: "version"},
 	"qwen-code":   {command: "qwen", versionFlag: "--version"},
 }

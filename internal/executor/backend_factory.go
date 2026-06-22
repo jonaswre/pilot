@@ -33,6 +33,12 @@ func NewBackend(config *BackendConfig) (Backend, error) {
 		b.SetHeartbeatTimeout(heartbeatTimeout)
 		return b, nil
 
+	case BackendTypeCodexCLI:
+		b := NewCodexCLIBackend(config.CodexCLI)
+		b.SetHeartbeatTimeout(heartbeatTimeout)
+		b.SetSubprocessLimits(config.SubprocessLimits)
+		return b, nil
+
 	case BackendTypeAnthropicAPI:
 		return NewAnthropicBackend(config), nil
 

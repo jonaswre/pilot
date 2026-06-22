@@ -293,6 +293,13 @@ var backends = []backendInfo{
 		installCmd:  "See https://github.com/anthropics/qwen-code",
 	},
 	{
+		name:        "codex",
+		backendType: "codex-cli",
+		command:     "codex",
+		versionArgs: []string{"--version"},
+		installCmd:  "npm install -g @openai/codex",
+	},
+	{
 		name:        "opencode",
 		backendType: "opencode",
 		command:     "opencode",

@@ -226,7 +226,7 @@ type BackendResult struct {
 
 // BackendConfig contains configuration for executor backends.
 type BackendConfig struct {
-	// Type specifies which backend to use ("claude-code", "opencode", or "qwen-code")
+	// Type specifies which backend to use ("claude-code", "codex-cli", "opencode", or "qwen-code")
 	Type string `yaml:"type"`
 
 	// AutoCreatePR controls whether PRs are created by default after successful execution.
@@ -256,6 +256,9 @@ type BackendConfig struct {
 
 	// QwenCode contains Qwen Code specific settings
 	QwenCode *QwenCodeConfig `yaml:"qwen_code,omitempty"`
+
+	// CodexCLI contains OpenAI Codex CLI specific settings
+	CodexCLI *CodexCLIConfig `yaml:"codex_cli,omitempty"`
 
 	// OpenAI contains OpenAI-compatible direct HTTP backend settings
 	OpenAI *OpenAIConfig `yaml:"openai,omitempty"`
@@ -691,6 +694,21 @@ type QwenCodeConfig struct {
 	UseSessionResume bool `yaml:"use_session_resume,omitempty"`
 }
 
+// CodexCLIConfig contains OpenAI Codex CLI backend configuration.
+// Codex runs through `codex exec --json` and emits Codex-native JSONL events.
+type CodexCLIConfig struct {
+	// Command is the path to the codex CLI (default: "codex")
+	Command string `yaml:"command,omitempty"`
+
+	// ExtraArgs are additional arguments to pass to `codex exec`.
+	// They are appended after Pilot's safety/model flags and before the prompt.
+	ExtraArgs []string `yaml:"extra_args,omitempty"`
+
+	// UseSessionResume enables `codex exec resume <thread_id>` for session continuation.
+	// Default: false
+	UseSessionResume bool `yaml:"use_session_resume,omitempty"`
+}
+
 // OpenCodeConfig contains OpenCode backend configuration.
 type OpenCodeConfig struct {
 	// ServerURL is the OpenCode server URL (default: "http://127.0.0.1:4096")
@@ -744,6 +762,9 @@ func DefaultBackendConfig() *BackendConfig {
 		},
 		QwenCode: &QwenCodeConfig{
 			Command: "qwen",
+		},
+		CodexCLI: &CodexCLIConfig{
+			Command: "codex",
 		},
 		OpenCode: &OpenCodeConfig{
 			ServerURL:       "http://127.0.0.1:4096",
@@ -926,4 +947,5 @@ const (
 	BackendTypeClaudeCode = "claude-code"
 	BackendTypeOpenCode   = "opencode"
 	BackendTypeQwenCode   = "qwen-code"
+	BackendTypeCodexCLI   = "codex-cli"
 )

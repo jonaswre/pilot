@@ -161,7 +161,7 @@ orchestrator:
 
 # Executor settings
 executor:
-  type: "claude-code"          # "claude-code", "opencode", "anthropic-api", or "openai-api"
+  type: "claude-code"          # "claude-code", "codex-cli", "opencode", "anthropic-api", or "openai-api"
   auto_create_pr: true         # Create PR by default after task completion
                                # Use --no-pr flag to disable for individual tasks
   # direct_commit: false       # DANGER: Enable direct commit to main (requires --direct-commit flag)
@@ -208,6 +208,13 @@ executor:
   #   api_key: "no-key"
   #   base_url: "http://localhost:11434/v1"
   #   model: "llama3"
+
+  # OpenAI Codex CLI backend
+  # Use type: "codex-cli" to run tasks through `codex exec --json`.
+  # codex_cli:
+  #   command: "codex"
+  #   extra_args: []              # e.g. ["--ephemeral"]
+  #   use_session_resume: true    # use `codex exec resume <thread_id>` for self-review
 
   # Worktree isolation - execute tasks in temporary git worktree
   # use_worktree: false        # When true, creates isolated worktree per task

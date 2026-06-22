@@ -104,7 +104,27 @@ adapters:
 
 Pilot supports multiple AI coding backends. Claude Code is recommended and enabled by default. The following backends are optional alternatives:
 
-<Tabs items={['Qwen Code', 'OpenCode']}>
+<Tabs items={['Codex CLI', 'Qwen Code', 'OpenCode']}>
+
+### Codex CLI
+
+If you want to use OpenAI Codex as the execution backend, install and authenticate Codex CLI:
+
+```bash
+npm install -g @openai/codex
+codex login
+codex --version
+
+# Configure Pilot to use Codex CLI
+# In ~/.pilot/config.yaml:
+executor:
+  type: codex-cli
+  codex_cli:
+    command: "codex"
+    use_session_resume: true
+```
+
+See [Execution Backends](/concepts/execution-backends#codex-cli) for detailed configuration and feature comparison.
 
 ### Qwen Code
 
@@ -180,8 +200,8 @@ See [Integrations](/integrations/linear) for detailed setup guides.
 
 Before proceeding to [Installation](/getting-started/installation):
 
-- [ ] Claude Code installed (`claude --version` outputs a version)
-- [ ] Claude Code authenticated (subscription login or API key set)
+- [ ] Claude Code installed (`claude --version` outputs a version), or another configured execution backend is installed
+- [ ] Execution backend authenticated (Claude subscription/API key, Codex login/API key, or provider-specific auth)
 - [ ] Git host token created and exported (`GITHUB_TOKEN` or `GITLAB_TOKEN`)
 - [ ] Repository exists with at least one commit
 

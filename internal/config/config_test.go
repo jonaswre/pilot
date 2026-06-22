@@ -1524,3 +1524,73 @@ func TestSave_TightensExistingLoosePerms(t *testing.T) {
 		t.Errorf("config file mode after rewrite = %o, want 0600", got)
 	}
 }
+
+func TestDefaultConfig_RuntimeDefaultsToHost(t *testing.T) {
+	cfg := DefaultConfig()
+
+	if cfg.Runtime == nil {
+		t.Fatal("Runtime config is nil")
+	}
+	if got := string(cfg.Runtime.Provider); got != "host" {
+		t.Fatalf("Runtime.Provider = %q, want host", got)
+	}
+}
+
+func TestLoad_RuntimeOpenSandboxConfig(t *testing.T) {
+	t.Setenv("OPEN_SANDBOX_API_KEY", "test-open-sandbox-key")
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+
+	data := []byte(`
+version: "1.0"
+runtime:
+  provider: opensandbox
+  opensandbox:
+    endpoint: http://opensandbox.local:8080
+    api_key: "${OPEN_SANDBOX_API_KEY}"
+    default_timeout: 45m
+    cleanup:
+      always_delete: true
+      retain_on_failure: false
+      retain_for: 2h
+    secrets:
+      GITHUB_TOKEN:
+        from_env: GITHUB_TOKEN
+      NPM_TOKEN:
+        from_env: NPM_TOKEN
+        optional: true
+`)
+	if err := os.WriteFile(configPath, data, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	if cfg.Runtime == nil {
+		t.Fatal("Runtime config is nil")
+	}
+	if got := string(cfg.Runtime.Provider); got != "opensandbox" {
+		t.Fatalf("Runtime.Provider = %q, want opensandbox", got)
+	}
+	if cfg.Runtime.OpenSandbox.Endpoint != "http://opensandbox.local:8080" {
+		t.Fatalf("Endpoint = %q", cfg.Runtime.OpenSandbox.Endpoint)
+	}
+	if cfg.Runtime.OpenSandbox.APIKey != "test-open-sandbox-key" {
+		t.Fatalf("APIKey = %q, want expanded env value", cfg.Runtime.OpenSandbox.APIKey)
+	}
+	if !cfg.Runtime.OpenSandbox.Secrets["NPM_TOKEN"].Optional {
+		t.Fatal("NPM_TOKEN mapping should be optional")
+	}
+}
+
+func TestValidate_RuntimeInvalidProvider(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Runtime.Provider = "docker"
+
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate returned nil, want invalid runtime provider error")
+	}
+}

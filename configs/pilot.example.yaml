@@ -159,6 +159,29 @@ orchestrator:
     poll_interval: 30s         # How often to check PR status
     pr_timeout: 1h             # Max time to wait for PR merge
 
+# Runtime selection is global for this Pilot installation.
+# host keeps today's local execution behavior.
+runtime:
+  provider: "host"             # "host" or "opensandbox"
+
+  # OpenSandbox runs each task in a short-lived sandbox. Repos describe the
+  # sandbox request in .pilot/environment.yaml; this config only selects the
+  # runtime and operator-owned connection/secrets.
+  # provider: "opensandbox"
+  # opensandbox:
+  #   endpoint: "http://opensandbox.local:8080"
+  #   api_key: "${OPEN_SANDBOX_API_KEY}"
+  #   default_timeout: 30m
+  #   cleanup:
+  #     always_delete: true
+  #     retain_on_failure: false
+  #   secrets:
+  #     GITHUB_TOKEN:
+  #       from_env: "GITHUB_TOKEN"
+  #     NPM_TOKEN:
+  #       from_env: "NPM_TOKEN"
+  #       optional: true
+
 # Executor settings
 executor:
   type: "claude-code"          # "claude-code", "opencode", "anthropic-api", or "openai-api"

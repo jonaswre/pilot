@@ -354,6 +354,8 @@ func buildBackendCardFromConfig(cfg *config.Config) SummaryCard {
 		switch backendType {
 		case "claude-code":
 			card.Value = "Claude Code"
+		case "codex-cli":
+			card.Value = "Codex CLI"
 		case "qwen-code":
 			card.Value = "Qwen Code"
 		case "opencode":

@@ -188,11 +188,11 @@ Always set `allowed_ids` to restrict who can trigger Pilot via Telegram. Without
 
 ## Executor
 
-Controls how Pilot runs execution backends (Claude Code, Qwen Code, or OpenCode) to execute tasks.
+Controls how Pilot runs execution backends (Claude Code, Codex CLI, Qwen Code, or OpenCode) to execute tasks.
 
 ```yaml
 executor:
-  type: "claude-code"                     # "claude-code", "qwen-code", or "opencode"
+  type: "claude-code"                     # "claude-code", "codex-cli", "qwen-code", or "opencode"
   auto_create_pr: true
   direct_commit: false                    # commit directly to branch without PR
   detect_ephemeral: true                  # detect and skip ephemeral changes
@@ -208,6 +208,11 @@ executor:
     command: "claude"                     # path to claude CLI
     extra_args: []                        # additional CLI arguments
     planning_timeout: 2m                  # max time for epic planning before fallback to direct mode
+
+  codex_cli:
+    command: "codex"                      # path to codex CLI
+    extra_args: []                        # additional codex exec arguments
+    use_session_resume: false             # reuse Codex threads for self-review
 
   model_routing:
     enabled: false
@@ -239,7 +244,7 @@ executor:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `type` | string | `"claude-code"` | Backend type: `claude-code`, `qwen-code`, or `opencode` |
+| `type` | string | `"claude-code"` | Backend type: `claude-code`, `codex-cli`, `qwen-code`, or `opencode` |
 | `auto_create_pr` | bool | `true` | Automatically create PRs after execution |
 | `direct_commit` | bool | `false` | Commit directly without PR |
 | `detect_ephemeral` | bool | `true` | Detect and skip ephemeral file changes |
@@ -251,6 +256,9 @@ executor:
 | `claude_code.command` | string | `"claude"` | Path to the Claude CLI binary |
 | `claude_code.extra_args` | []string | `[]` | Additional CLI arguments |
 | `claude_code.planning_timeout` | duration | `2m` | Maximum time for epic planning before fallback to direct execution. Affects Slack `/plan` and Telegram planning commands. |
+| `codex_cli.command` | string | `"codex"` | Path to the Codex CLI binary |
+| `codex_cli.extra_args` | []string | `[]` | Additional `codex exec` arguments |
+| `codex_cli.use_session_resume` | bool | `false` | Reuse Codex threads for self-review |
 | `qwen_code.command` | string | `"qwen"` | Path to the Qwen Code CLI binary |
 | `qwen_code.use_session_resume` | bool | `false` | Reuse sessions for self-review |
 | `model_routing.enabled` | bool | `false` | Route tasks to different models by complexity |
@@ -273,7 +281,7 @@ executor:
 | `decompose.max_subtasks` | int | `5` | Maximum subtasks created (2-10) |
 | `decompose.min_description_words` | int | `50` | Minimum description words to decompose |
 
-<Tabs items={['Claude Code', 'OpenCode']}>
+<Tabs items={['Claude Code', 'Codex CLI', 'OpenCode']}>
 
 ```yaml
 executor:
@@ -281,6 +289,15 @@ executor:
   claude_code:
     command: "claude"
     extra_args: ["--verbose"]
+```
+
+```yaml
+executor:
+  type: "codex-cli"
+  codex_cli:
+    command: "codex"
+    extra_args: ["--ephemeral"]
+    use_session_resume: true
 ```
 
 
@@ -298,6 +315,14 @@ executor:
 
 </Tabs>
 
+**Codex CLI backend fields**
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `codex_cli.command` | string | `"codex"` | Path to the Codex CLI binary |
+| `codex_cli.extra_args` | []string | `[]` | Additional arguments appended to `codex exec` before the prompt |
+| `codex_cli.use_session_resume` | bool | `false` | Continue prior Codex threads via `codex exec resume <thread_id>` |
+
 **OpenCode backend fields**
 
 | Field | Type | Default | Description |
@@ -310,7 +335,7 @@ executor:
 | `opencode.request_timeout` | duration | `"10m"` | HTTP timeout for session creation, message send, and SSE response headers ([GH-2410](https://github.com/qf-studio/pilot/issues/2410)) |
 
 <Callout type="info">
-**Self-review timeout is backend-aware.** The self-review phase is capped at **10 minutes** for OpenCode and **2 minutes** for Claude Code / Qwen Code. OpenCode's SSE streaming legitimately runs slower than a Claude Code subprocess; a 2-minute cap cancels review while the backend is still working and surfaces as a false regression ([GH-2416](https://github.com/qf-studio/pilot/issues/2416)). The cap is not user-configurable today.
+**Self-review timeout is backend-aware.** The self-review phase is capped at **10 minutes** for OpenCode and **2 minutes** for Claude Code / Codex CLI / Qwen Code. OpenCode's SSE streaming legitimately runs slower than a CLI subprocess; a 2-minute cap cancels review while the backend is still working and surfaces as a false regression ([GH-2416](https://github.com/qf-studio/pilot/issues/2416)). The cap is not user-configurable today.
 </Callout>
 
 ### Tool Restriction (per-subprocess token control)

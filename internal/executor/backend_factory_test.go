@@ -32,6 +32,11 @@ func TestNewBackend(t *testing.T) {
 			expectType: BackendTypeOpenCode,
 		},
 		{
+			name:       "codex-cli type",
+			config:     &BackendConfig{Type: BackendTypeCodexCLI},
+			expectType: BackendTypeCodexCLI,
+		},
+		{
 			name:        "unknown type",
 			config:      &BackendConfig{Type: "unknown-backend"},
 			expectError: true,
@@ -80,6 +85,11 @@ func TestNewBackendFromType(t *testing.T) {
 			expectType:  BackendTypeOpenCode,
 		},
 		{
+			name:        "codex-cli",
+			backendType: BackendTypeCodexCLI,
+			expectType:  BackendTypeCodexCLI,
+		},
+		{
 			name:        "unknown",
 			backendType: "invalid",
 			expectError: true,
@@ -104,6 +114,33 @@ func TestNewBackendFromType(t *testing.T) {
 				t.Errorf("Name() = %q, want %q", backend.Name(), tt.expectType)
 			}
 		})
+	}
+}
+
+func TestNewBackendWithCodexCLIConfig(t *testing.T) {
+	config := &BackendConfig{
+		Type: BackendTypeCodexCLI,
+		CodexCLI: &CodexCLIConfig{
+			Command:   "/custom/codex",
+			ExtraArgs: []string{"--ephemeral"},
+		},
+	}
+
+	backend, err := NewBackend(config)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if backend.Name() != BackendTypeCodexCLI {
+		t.Errorf("Name() = %q, want %q", backend.Name(), BackendTypeCodexCLI)
+	}
+
+	codexBackend, ok := backend.(*CodexCLIBackend)
+	if !ok {
+		t.Fatal("backend is not *CodexCLIBackend")
+	}
+	if codexBackend.config.Command != "/custom/codex" {
+		t.Errorf("Command = %q, want /custom/codex", codexBackend.config.Command)
 	}
 }
 

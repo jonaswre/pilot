@@ -9,26 +9,27 @@ Pilot supports multiple AI coding backends via a unified execution interface. Al
 Pilot abstracts away backend-specific differences so you can swap between AI providers without changing your workflow:
 
 - **Claude Code** (default): Anthropic's native CLI tool with full feature support
+- **Codex CLI**: OpenAI's coding agent CLI with `codex exec --json` automation
 - **Qwen Code**: Alibaba's Qwen models with structured JSON output and session resume
 - **OpenCode**: Community-driven backend with client/server architecture
 
-All three execute the same logic, handle tool calls identically, and produce pull requests. The differences lie in model capabilities, configuration complexity, and feature parity.
+All backends execute the same Pilot pipeline and produce pull requests. The differences lie in model capabilities, configuration complexity, and feature parity.
 
 ---
 
 ## Feature Comparison
 
-| Feature | Claude Code | Qwen Code | OpenCode |
-|---------|------------|-----------|----------|
-| **Stream JSON output** | Yes | Yes (v0.1.0+) | SSE (streaming) |
-| **Session resume (`--resume`)** | Yes | Yes | No |
-| **PR context (`--from-pr`)** | Yes | No | No |
-| **Effort routing** | Yes | No (silently skipped) | No |
-| **Model routing** | Yes | Yes | Via config |
-| **Permissions skip** | `--dangerously-skip-permissions` | `--yolo` | N/A |
-| **Verbose mode** | `--verbose` | Not supported | N/A |
-| **Error retry (rate limit, API)** | Yes | Yes | No (raw HTTP) |
-| **Session-not-found fallback** | Yes (`--from-pr` retry) | Yes (`--resume` retry) | No |
+| Feature | Claude Code | Codex CLI | Qwen Code | OpenCode |
+|---------|------------|-----------|-----------|----------|
+| **Stream JSON output** | Yes | Yes (`codex exec --json`) | Yes (v0.1.0+) | SSE (streaming) |
+| **Session resume** | Yes (`--resume`) | Yes (`codex exec resume`) | Yes | No |
+| **PR context (`--from-pr`)** | Yes | No | No | No |
+| **Effort routing** | Yes | Yes (`model_reasoning_effort`) | No (silently skipped) | No |
+| **Model routing** | Yes | Yes | Yes | Via config |
+| **Permissions skip** | `--dangerously-skip-permissions` | `--dangerously-bypass-approvals-and-sandbox` | `--yolo` | N/A |
+| **Verbose mode** | `--verbose` | JSONL events | Not supported | N/A |
+| **Error retry (rate limit, API)** | Yes | Yes | Yes | No (raw HTTP) |
+| **Session-not-found fallback** | Yes (`--from-pr`/`--resume` retry) | Yes (`resume` retry) | Yes (`--resume` retry) | No |
 
 ---
 
@@ -82,6 +83,64 @@ executor:
 - Default choice for all use cases
 - Teams wanting comprehensive features
 - Projects with high task complexity
+
+---
+
+## Codex CLI
+
+OpenAI's Codex CLI backend runs Pilot tasks through `codex exec --json`. It uses the same subprocess lifecycle as the other CLI backends: heartbeat timeout, watchdog timeout, stderr diagnostics, rate-limit/API error classification, and session-not-found fallback.
+
+### Prerequisites
+
+```bash
+npm install -g @openai/codex
+codex login  # or provide Codex-supported API key auth for automation
+codex --version
+```
+
+### Configuration
+
+```yaml
+executor:
+  type: codex-cli
+  codex_cli:
+    command: "codex"
+    extra_args: []
+    use_session_resume: true
+```
+
+### Configuration Fields
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `command` | string | `"codex"` | Path to the Codex CLI binary |
+| `extra_args` | []string | `[]` | Additional arguments appended to `codex exec` before the prompt |
+| `use_session_resume` | bool | `false` | Use `codex exec resume <thread_id>` for context continuation |
+
+### Important Notes
+
+- **Automation mode**: Pilot invokes `codex exec --json --sandbox danger-full-access --dangerously-bypass-approvals-and-sandbox`.
+- **Session resume**: Pilot captures the `thread_id` from `thread.started` and can use it for self-review when `use_session_resume` is enabled.
+- **Effort routing**: Pilot maps `max` to Codex's `xhigh` reasoning effort and passes other supported effort values through `model_reasoning_effort`.
+- **No PR context flag**: Codex CLI does not have a `--from-pr` equivalent, so Pilot ignores `FromPR` for this backend.
+
+### Strengths
+
+- ✅ OpenAI Codex execution with native JSONL automation
+- ✅ Session resume for context reuse
+- ✅ Model and reasoning-effort routing
+- ✅ Rate limit, API, timeout, and session errors classified for retries
+
+### Limitations
+
+- ❌ No `--from-pr` equivalent
+- ❌ Claude-specific `allowed_tools` / `mcp_config_path` settings do not apply
+
+### Best For
+
+- Teams using OpenAI Codex as their coding agent
+- Environments standardizing on OpenAI authentication and models
+- Users who want a local CLI backend without an HTTP server
 
 ---
 
@@ -264,12 +323,15 @@ opencode serve
 Do you want the most features?
 ├─ Yes → Claude Code (default, recommended)
 └─ No
-  ├─ Do you use Qwen models?
-  │  ├─ Yes → Qwen Code
+  ├─ Do you use OpenAI Codex?
+  │  ├─ Yes → Codex CLI
   │  └─ No
-  │    └─ Do you need a server-based backend?
-  │       ├─ Yes → OpenCode
-  │       └─ No → Claude Code (default)
+  │    ├─ Do you use Qwen models?
+  │    │  ├─ Yes → Qwen Code
+  │    │  └─ No
+  │    │    └─ Do you need a server-based backend?
+  │    │       ├─ Yes → OpenCode
+  │    │       └─ No → Claude Code (default)
 ```
 
 ### Comparison Summary
@@ -277,6 +339,7 @@ Do you want the most features?
 | Need | Best Fit |
 |------|----------|
 | Default, all features | Claude Code |
+| OpenAI Codex CLI execution | Codex CLI |
 | Qwen model support | Qwen Code |
 | Self-hosted/server-based | OpenCode |
 | Cost optimization + features | Claude Code with model routing |
@@ -290,9 +353,9 @@ Switch backends by changing the `executor.type` field in your config and restart
 
 ```yaml
 executor:
-  type: "qwen-code"  # Change from "claude-code" to "qwen-code"
-  qwen_code:
-    command: "qwen"
+  type: "codex-cli"  # Change from "claude-code" to "codex-cli"
+  codex_cli:
+    command: "codex"
     use_session_resume: true
 ```
 
@@ -312,6 +375,7 @@ pilot doctor
 
 # Output indicates which backends are available:
 # ✓ Claude Code detected (installed)
+# ✓ Codex CLI detected (installed)
 # ✓ Qwen Code detected (installed)
 # ✗ OpenCode server not running (opencode CLI found)
 ```
@@ -329,11 +393,13 @@ executor:
 
 **Claude Code**: Sessions are stored in `~/.claude/sessions/`
 
+**Codex CLI**: Requires `codex exec --json` support and `codex_cli.use_session_resume: true`
+
 **Qwen Code**: Requires `qwen --version` to show v0.1.0+
 
 ### Rate limit errors
 
-**Claude Code** and **Qwen Code** automatically retry with exponential backoff. **OpenCode** does not — you must handle retries at the Pilot orchestrator level.
+**Claude Code**, **Codex CLI**, and **Qwen Code** automatically retry with exponential backoff. **OpenCode** does not — you must handle retries at the Pilot orchestrator level.
 
 Enable retry configuration:
 

@@ -84,6 +84,12 @@ func TestDefaultBackendConfig(t *testing.T) {
 	if config.OpenCode.ServerURL != "http://127.0.0.1:4096" {
 		t.Errorf("OpenCode.ServerURL = %q, want http://127.0.0.1:4096", config.OpenCode.ServerURL)
 	}
+	if config.CodexCLI == nil {
+		t.Error("CodexCLI config should not be nil")
+	}
+	if config.CodexCLI.Command != "codex" {
+		t.Errorf("CodexCLI.Command = %q, want codex", config.CodexCLI.Command)
+	}
 }
 
 func TestBackendConfigTypes(t *testing.T) {
@@ -92,6 +98,9 @@ func TestBackendConfigTypes(t *testing.T) {
 	}
 	if BackendTypeOpenCode != "opencode" {
 		t.Errorf("BackendTypeOpenCode = %q, want opencode", BackendTypeOpenCode)
+	}
+	if BackendTypeCodexCLI != "codex-cli" {
+		t.Errorf("BackendTypeCodexCLI = %q, want codex-cli", BackendTypeCodexCLI)
 	}
 }
 
@@ -106,6 +115,24 @@ func TestClaudeCodeConfig(t *testing.T) {
 	}
 	if len(config.ExtraArgs) != 2 {
 		t.Errorf("ExtraArgs length = %d, want 2", len(config.ExtraArgs))
+	}
+}
+
+func TestCodexCLIConfig(t *testing.T) {
+	config := &CodexCLIConfig{
+		Command:          "codex-custom",
+		ExtraArgs:        []string{"--ephemeral"},
+		UseSessionResume: true,
+	}
+
+	if config.Command != "codex-custom" {
+		t.Errorf("Command = %q, want codex-custom", config.Command)
+	}
+	if len(config.ExtraArgs) != 1 {
+		t.Errorf("ExtraArgs length = %d, want 1", len(config.ExtraArgs))
+	}
+	if !config.UseSessionResume {
+		t.Error("UseSessionResume should be true")
 	}
 }
 

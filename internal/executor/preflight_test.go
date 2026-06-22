@@ -25,6 +25,19 @@ func TestCheckClaudeAvailable(t *testing.T) {
 	// If no error, claude is installed and working
 }
 
+func TestBackendCLICommandsIncludesCodexCLI(t *testing.T) {
+	info, ok := backendCLICommands[BackendTypeCodexCLI]
+	if !ok {
+		t.Fatal("backendCLICommands missing codex-cli")
+	}
+	if info.command != "codex" {
+		t.Errorf("command = %q, want codex", info.command)
+	}
+	if info.versionFlag != "--version" {
+		t.Errorf("versionFlag = %q, want --version", info.versionFlag)
+	}
+}
+
 func TestCheckGitRepo(t *testing.T) {
 	ctx := context.Background()
 

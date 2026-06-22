@@ -35,6 +35,18 @@ var supportedBackends = []backendInfo{
 		},
 	},
 	{
+		Name:      executor.BackendTypeCodexCLI,
+		Command:   "codex",
+		ConfigKey: "codex_cli",
+		getVersion: func(cmd string) string {
+			out, err := exec.Command(cmd, "--version").Output()
+			if err != nil {
+				return ""
+			}
+			return strings.TrimSpace(string(out))
+		},
+	},
+	{
 		Name:      executor.BackendTypeQwenCode,
 		Command:   "qwen",
 		ConfigKey: "qwen_code",
@@ -64,7 +76,7 @@ func newBackendCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "backend",
 		Short: "Manage execution backends",
-		Long: `Manage AI execution backends (Claude Code, Qwen Code, OpenCode).
+		Long: `Manage AI execution backends (Claude Code, Codex CLI, Qwen Code, OpenCode).
 
 List supported backends, check their status, and switch the active backend.`,
 	}
@@ -87,6 +99,7 @@ func newBackendListCmd() *cobra.Command {
 Example output:
   Backend        Status      Command    Config
   claude-code    ✓ installed claude     (default)
+  codex-cli      ✓ installed codex
   qwen-code      ✗ missing   qwen
   opencode       ✓ installed opencode  `,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -122,6 +135,10 @@ Example output:
 					case executor.BackendTypeQwenCode:
 						if cfg.Executor.QwenCode != nil && cfg.Executor.QwenCode.Command != "" {
 							command = cfg.Executor.QwenCode.Command
+						}
+					case executor.BackendTypeCodexCLI:
+						if cfg.Executor.CodexCLI != nil && cfg.Executor.CodexCLI.Command != "" {
+							command = cfg.Executor.CodexCLI.Command
 						}
 					case executor.BackendTypeOpenCode:
 						// OpenCode uses server command
@@ -208,6 +225,10 @@ Example output:
 					if cfg.Executor.QwenCode != nil && cfg.Executor.QwenCode.Command != "" {
 						command = cfg.Executor.QwenCode.Command
 					}
+				case executor.BackendTypeCodexCLI:
+					if cfg.Executor.CodexCLI != nil && cfg.Executor.CodexCLI.Command != "" {
+						command = cfg.Executor.CodexCLI.Command
+					}
 				case executor.BackendTypeOpenCode:
 					if cfg.Executor.OpenCode != nil && cfg.Executor.OpenCode.ServerCommand != "" {
 						parts := strings.Fields(cfg.Executor.OpenCode.ServerCommand)
@@ -253,6 +274,10 @@ Example output:
 					if cfg.Executor.QwenCode != nil {
 						fmt.Printf("  executor.qwen_code.command: %s\n", command)
 					}
+				case executor.BackendTypeCodexCLI:
+					if cfg.Executor.CodexCLI != nil {
+						fmt.Printf("  executor.codex_cli.command: %s\n", command)
+					}
 				case executor.BackendTypeOpenCode:
 					if cfg.Executor.OpenCode != nil {
 						if cfg.Executor.OpenCode.ServerURL != "" {
@@ -273,7 +298,7 @@ func newBackendSetCmd() *cobra.Command {
 		Short: "Set active backend",
 		Long: `Switch the active backend in the config file.
 
-Valid types: claude-code, qwen-code, opencode
+Valid types: claude-code, codex-cli, qwen-code, opencode
 
 Example:
   pilot backend set qwen-code
@@ -283,21 +308,8 @@ Example:
 		RunE: func(cmd *cobra.Command, args []string) error {
 			backendType := args[0]
 
-			// Validate backend type
-			validTypes := []string{
-				executor.BackendTypeClaudeCode,
-				executor.BackendTypeQwenCode,
-				executor.BackendTypeOpenCode,
-			}
-			isValid := false
-			for _, t := range validTypes {
-				if backendType == t {
-					isValid = true
-					break
-				}
-			}
-			if !isValid {
-				return fmt.Errorf("invalid backend type: %s\nValid types: %s", backendType, strings.Join(validTypes, ", "))
+			if !isSupportedBackendType(backendType) {
+				return fmt.Errorf("invalid backend type: %s\nValid types: %s", backendType, strings.Join(supportedBackendTypes(), ", "))
 			}
 
 			configPath := cfgFile
@@ -351,6 +363,10 @@ Example:
 					if cfg.Executor.QwenCode != nil && cfg.Executor.QwenCode.Command != "" {
 						command = cfg.Executor.QwenCode.Command
 					}
+				case executor.BackendTypeCodexCLI:
+					if cfg.Executor.CodexCLI != nil && cfg.Executor.CodexCLI.Command != "" {
+						command = cfg.Executor.CodexCLI.Command
+					}
 				case executor.BackendTypeOpenCode:
 					if cfg.Executor.OpenCode != nil && cfg.Executor.OpenCode.ServerCommand != "" {
 						parts := strings.Fields(cfg.Executor.OpenCode.ServerCommand)
@@ -371,4 +387,21 @@ Example:
 			return nil
 		},
 	}
+}
+
+func supportedBackendTypes() []string {
+	types := make([]string, 0, len(supportedBackends))
+	for _, backend := range supportedBackends {
+		types = append(types, backend.Name)
+	}
+	return types
+}
+
+func isSupportedBackendType(backendType string) bool {
+	for _, supported := range supportedBackendTypes() {
+		if backendType == supported {
+			return true
+		}
+	}
+	return false
 }
